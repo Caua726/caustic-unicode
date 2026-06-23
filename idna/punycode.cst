@@ -1,0 +1,148 @@
+// =======================================================
+// caustic-unicode/idna/punycode.cst
+// Punycode (RFC 3492). Operates on single labels (no "xn--" prefix).
+// =======================================================
+
+use "../core/errno.cst" as errno;
+use "../core/buf.cst"   as buf;
+
+let is i64 as P_BASE  with imut = 36;
+let is i64 as P_TMIN  with imut = 1;
+let is i64 as P_TMAX  with imut = 26;
+let is i64 as P_SKEW  with imut = 38;
+let is i64 as P_DAMP  with imut = 700;
+let is i64 as P_IBIAS with imut = 72;
+let is i64 as P_IN    with imut = 128;
+let is i64 as P_DELIM with imut = 45;        // '-'
+
+fn _digit_basic(d as i64) as u8 {
+    if (d < 26) { return cast(u8, 97 + d); }     // a-z
+    return cast(u8, 22 + d);                      // 0-9 (48 + d-26)
+}
+fn _basic_digit(c as u8) as i64 {
+    if (c >= 97 && c <= 122) { return cast(i64, c) - 97; }
+    if (c >= 65 && c <= 90)  { return cast(i64, c) - 65; }
+    if (c >= 48 && c <= 57)  { return cast(i64, c) - 22; }
+    return 0 - 1;
+}
+fn _adapt(delta as i64, numpoints as i64, firsttime as i64) as i64 {
+    let is i64 as d with mut = delta;
+    if (firsttime == 1) { d = d / P_DAMP; } else { d = d / 2; }
+    d = d + d / numpoints;
+    let is i64 as k with mut = 0;
+    while (d > ((P_BASE - P_TMIN) * P_TMAX) / 2) { d = d / (P_BASE - P_TMIN); k = k + P_BASE; }
+    return k + (P_BASE - P_TMIN + 1) * d / (d + P_SKEW);
+}
+
+fn _threshold(k as i64, bias as i64) as i64 {
+    if (k <= bias) { return P_TMIN; }
+    if (k >= bias + P_TMAX) { return P_TMAX; }
+    return k - bias;
+}
+
+// Encode a label's code points to ASCII (appended to out). Returns count, or
+// 0 - UERR_PUNYCODE on overflow.
+fn punycode_encode(cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as start = out.len;
+    let is i64 as nn with mut = P_IN;
+    let is i64 as delta with mut = 0;
+    let is i64 as bias with mut = P_IBIAS;
+    let is i64 as b with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (cps[i] < 128) { if (buf.bytebuf_push(out, cast(u8, cps[i])) < 0) { return 0 - errno.UERR_NOSPACE; } b = b + 1; }
+        i = i + 1;
+    }
+    let is i64 as h with mut = b;
+    if (b > 0) { buf.bytebuf_push(out, cast(u8, P_DELIM)); }
+    while (h < n) {
+        let is i64 as m with mut = 2147483647;
+        i = 0;
+        while (i < n) { let is i64 as c = cast(i64, cps[i]); if (c >= nn && c < m) { m = c; } i = i + 1; }
+        if ((m - nn) > (2147483647 - delta) / (h + 1)) { return 0 - errno.UERR_PUNYCODE; }
+        delta = delta + (m - nn) * (h + 1);
+        nn = m;
+        i = 0;
+        while (i < n) {
+            let is i64 as c = cast(i64, cps[i]);
+            if (c < nn) { delta = delta + 1; }
+            if (c == nn) {
+                let is i64 as q with mut = delta;
+                let is i64 as k with mut = P_BASE;
+                let is i64 as done with mut = 0;
+                while (done == 0) {
+                    let is i64 as t = _threshold(k, bias);
+                    if (q < t) { done = 1; }
+                    else {
+                        buf.bytebuf_push(out, _digit_basic(t + (q - t) % (P_BASE - t)));
+                        q = (q - t) / (P_BASE - t);
+                        k = k + P_BASE;
+                    }
+                }
+                buf.bytebuf_push(out, _digit_basic(q));
+                let is i64 as ft with mut = 0;
+                if (h == b) { ft = 1; }
+                bias = _adapt(delta, h + 1, ft);
+                delta = 0;
+                h = h + 1;
+            }
+            i = i + 1;
+        }
+        delta = delta + 1;
+        nn = nn + 1;
+    }
+    return out.len - start;
+}
+
+// Decode an ASCII label (no prefix) to code points (appended to out). Returns
+// count, or 0 - UERR_PUNYCODE on malformed input.
+fn punycode_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as start = out.len;
+    let is i64 as nn with mut = P_IN;
+    let is i64 as i with mut = 0;
+    let is i64 as bias with mut = P_IBIAS;
+    let is i64 as last with mut = 0 - 1;
+    let is i64 as j with mut = 0;
+    while (j < n) { if (cast(i64, src[j]) == P_DELIM) { last = j; } j = j + 1; }
+    let is i64 as basic with mut = 0;
+    if (last >= 0) { basic = last; }
+    j = 0;
+    while (j < basic) {
+        if (src[j] >= 128) { return 0 - errno.UERR_PUNYCODE; }
+        if (buf.cpbuf_push(out, cast(i32, src[j])) < 0) { return 0 - errno.UERR_NOSPACE; }
+        j = j + 1;
+    }
+    let is i64 as ip with mut = 0;
+    if (last >= 0) { ip = last + 1; }
+    while (ip < n) {
+        let is i64 as oldi = i;
+        let is i64 as w with mut = 1;
+        let is i64 as k with mut = P_BASE;
+        let is i64 as done with mut = 0;
+        while (done == 0) {
+            if (ip >= n) { return 0 - errno.UERR_PUNYCODE; }
+            let is i64 as digit = _basic_digit(src[ip]);
+            ip = ip + 1;
+            if (digit < 0) { return 0 - errno.UERR_PUNYCODE; }
+            if (digit > (2147483647 - i) / w) { return 0 - errno.UERR_PUNYCODE; }
+            i = i + digit * w;
+            let is i64 as t = _threshold(k, bias);
+            if (digit < t) { done = 1; }
+            else { w = w * (P_BASE - t); k = k + P_BASE; }
+        }
+        let is i64 as outlen = (out.len - start) + 1;
+        let is i64 as ft with mut = 0;
+        if (oldi == 0) { ft = 1; }
+        bias = _adapt(i - oldi, outlen, ft);
+        nn = nn + i / outlen;
+        i = i % outlen;
+        // insert nn at position i within the decoded part
+        if (buf.cpbuf_push(out, cast(i32, nn)) < 0) { return 0 - errno.UERR_NOSPACE; }
+        let is i64 as q with mut = out.len - 1;
+        let is i64 as ins = start + i;
+        while (q > ins) { out.ptr[q] = out.ptr[q - 1]; q = q - 1; }
+        out.ptr[ins] = cast(i32, nn);
+        i = i + 1;
+    }
+    return out.len - start;
+}

@@ -1,0 +1,65 @@
+// =======================================================
+// tests/test_idna.cst — IDNA / UTS #46 to_ascii / to_unicode + Punycode.
+// Curated cases from IdnaTestV2 (the exhaustive run with error-code matching
+// is future work; this validates mapping + NFC + Punycode round-trips).
+// Exit 0 = pass; non-zero = the numbered check that failed.
+// =======================================================
+
+use "../idna/uts46.cst"    as uts46;
+use "../idna/punycode.cst" as puny;
+use "../core/buf.cst"      as buf;
+
+fn eqs(o as *buf.ByteBuf, s as *u8) as i32 {
+    let is i64 as i with mut = 0;
+    while (s[i] != 0) {
+        if (i >= o.len || o.ptr[i] != s[i]) { return 0; }
+        i = i + 1;
+    }
+    if (i != o.len) { return 0; }
+    return 1;
+}
+
+fn main() as i32 {
+    let is buf.ByteBuf as o = buf.bytebuf_new(32);
+
+    // faß.de -> xn--fa-hia.de (non-transitional keeps ß, punycodes it)
+    buf.bytebuf_reset(&o); uts46.to_ascii("fa\xC3\x9F.de", 7, 0, &o);
+    if (eqs(&o, "xn--fa-hia.de") == 0) { return 1; }
+    // faß.de transitional -> fass.de (ß -> ss)
+    buf.bytebuf_reset(&o); uts46.to_ascii("fa\xC3\x9F.de", 7, uts46.UTS46_TRANSITIONAL, &o);
+    if (eqs(&o, "fass.de") == 0) { return 2; }
+    // Faß.de -> xn--fa-hia.de (uppercase F mapped to f)
+    buf.bytebuf_reset(&o); uts46.to_ascii("Fa\xC3\x9F.de", 7, 0, &o);
+    if (eqs(&o, "xn--fa-hia.de") == 0) { return 3; }
+    // to_unicode(xn--fa-hia.de) -> faß.de
+    buf.bytebuf_reset(&o); uts46.to_unicode("xn--fa-hia.de", 13, 0, &o);
+    if (eqs(&o, "fa\xC3\x9F.de") == 0) { return 4; }
+
+    // bücher -> xn--bcher-kva  (RFC 3492 example)
+    buf.bytebuf_reset(&o); uts46.to_ascii("b\xC3\xBCcher", 7, 0, &o);
+    if (eqs(&o, "xn--bcher-kva") == 0) { return 5; }
+    buf.bytebuf_reset(&o); uts46.to_unicode("xn--bcher-kva", 13, 0, &o);
+    if (eqs(&o, "b\xC3\xBCcher") == 0) { return 6; }
+
+    // ASCII passthrough + uppercase mapping
+    buf.bytebuf_reset(&o); uts46.to_ascii("example.com", 11, 0, &o);
+    if (eqs(&o, "example.com") == 0) { return 7; }
+    buf.bytebuf_reset(&o); uts46.to_ascii("EXAMPLE.COM", 11, 0, &o);
+    if (eqs(&o, "example.com") == 0) { return 8; }
+
+    // CJK: 例え.テスト  (to_ascii then back)
+    buf.bytebuf_reset(&o); uts46.to_ascii("\xE4\xBE\x8B\xE3\x81\x88", 6, 0, &o);
+    if (eqs(&o, "xn--r8jz45g") == 0) { return 9; }
+
+    // raw Punycode round-trip
+    let is buf.CpBuf as cp = buf.cpbuf_new(16);
+    puny.punycode_decode("bcher-kva", 9, &cp);
+    let is [6]i32 as exp; exp[0]=98; exp[1]=252; exp[2]=99; exp[3]=104; exp[4]=101; exp[5]=114;
+    if (cp.len != 6) { return 10; }
+    let is i64 as i with mut = 0;
+    while (i < 6) { if (cp.ptr[i] != exp[i]) { return 11; } i = i + 1; }
+    buf.cpbuf_free(&cp);
+
+    buf.bytebuf_free(&o);
+    return 0;
+}

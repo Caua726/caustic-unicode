@@ -1,0 +1,7 @@
+// =======================================================
+// caustic-unicode/idna — IDNA2008 / UTS #46 (subtree facade).
+// Punycode (RFC 3492) + UTS #46 to_ascii / to_unicode.
+// =======================================================
+
+use "punycode.cst" as punycode;
+use "uts46.cst"    as uts46;
