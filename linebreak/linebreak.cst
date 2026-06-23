@@ -1,0 +1,294 @@
+// =======================================================
+// caustic-unicode/linebreak/linebreak.cst
+// Line breaking (UAX #14, rules LB1-LB31). Resolves line-break classes
+// (LB1), folds combining marks/ZWJ into their base (LB9/LB10), then applies
+// the break rules. line_break_fill writes one opportunity per position:
+//   0 = prohibited (no break), 1 = allowed break, 2 = mandatory break.
+// =======================================================
+
+use "../core/errno.cst"         as errno;
+use "../core/buf.cst"           as buf;
+use "../ucd/props.cst"          as props;
+use "../ucd/tables/lb.cst"      as lb;
+use "../ucd/tables/extpict.cst" as ep;
+use "../ucd/tables/eaw.cst"     as eaw;
+
+let is i64 as LB_PROHIBITED with imut = 0;
+let is i64 as LB_ALLOWED    with imut = 1;
+let is i64 as LB_MANDATORY  with imut = 2;
+
+// Module scratch: resolved classes (_c) and pre-LB9 classes (_c0).
+let is buf.ByteBuf as _c  with mut;
+let is buf.ByteBuf as _c0 with mut;
+let is i32 as _ready with mut = 0;
+
+fn _ensure() as void {
+    if (_ready == 0) { _c = buf.bytebuf_new(64); _c0 = buf.bytebuf_new(64); _ready = 1; }
+    buf.bytebuf_reset(&_c);
+    buf.bytebuf_reset(&_c0);
+}
+
+// LB1: resolve AI/SG/XX -> AL, SA -> CM/AL (by gc), CJ -> NS.
+fn _resolve(cp as i32) as i64 {
+    let is i64 as c = cast(i64, lb.lb_get(cp));
+    if (c == lb.LB_AI || c == lb.LB_SG || c == lb.LB_XX) { return lb.LB_AL; }
+    if (c == lb.LB_SA) {
+        let is i64 as gc = props.general_category(cp);
+        if (gc == props.GC_MN || gc == props.GC_MC) { return lb.LB_CM; }
+        return lb.LB_AL;
+    }
+    if (c == lb.LB_CJ) { return lb.LB_NS; }
+    return c;
+}
+
+fn _is_brk_or_sp(c as i64) as i64 {
+    if (c == lb.LB_BK || c == lb.LB_CR || c == lb.LB_LF || c == lb.LB_NL || c == lb.LB_SP || c == lb.LB_ZW) { return 1; }
+    return 0;
+}
+
+// index of last non-SP class at/before i (over resolved _c).
+fn _psp(i as i64) as i64 {
+    let is i64 as j with mut = i;
+    while (j >= 0 && cast(i64, _c.ptr[j]) == lb.LB_SP) { j = j - 1; }
+    return j;
+}
+
+// LB25: does "NU (SY|IS)*" end at index `end` (scanning back over SY/IS to a NU)?
+fn _num_before(end as i64) as i64 {
+    let is i64 as k with mut = end;
+    while (k >= 0 && (cast(i64, _c.ptr[k]) == lb.LB_SY || cast(i64, _c.ptr[k]) == lb.LB_IS)) { k = k - 1; }
+    if (k >= 0 && cast(i64, _c.ptr[k]) == lb.LB_NU) { return 1; }
+    return 0;
+}
+
+// LB28a "aksara": AK, AS, or U+25CC DOTTED CIRCLE (the rule's "◌").
+fn _aksara(cps as *i32, i as i64) as i64 {
+    let is i64 as c = cast(i64, _c.ptr[i]);
+    if (c == lb.LB_AK || c == lb.LB_AS) { return 1; }
+    if (cps[i] == 9676) { return 1; }
+    return 0;
+}
+
+// _aksara at index i, skipping back over attached CM/ZWJ to the cluster base.
+fn _aksara_left(cps as *i32, i as i64) as i64 {
+    let is i64 as j with mut = i;
+    while (j > 0 && (cast(i64, _c0.ptr[j]) == lb.LB_CM || cast(i64, _c0.ptr[j]) == lb.LB_ZWJ)) { j = j - 1; }
+    return _aksara(cps, j);
+}
+
+// East-Asian OP/CP (LB30 exception): EAW F/W/H.
+fn _is_ea(cp as i32) as i64 {
+    let is i64 as w = props.east_asian_width(cp);
+    if (w == eaw.EAW_F || w == eaw.EAW_W || w == eaw.EAW_H) { return 1; }
+    return 0;
+}
+
+// Break opportunity before position i (1..n-1) over the resolved arrays.
+fn _bb(cps as *i32, n as i64, i as i64) as i64 {
+    let is i64 as a = cast(i64, _c.ptr[i - 1]);
+    let is i64 as b = cast(i64, _c.ptr[i]);
+
+    if (a == lb.LB_BK) { return 2; }                                                    // LB4
+    if (a == lb.LB_CR && b == lb.LB_LF) { return 0; }                                   // LB5
+    if (a == lb.LB_CR || a == lb.LB_LF || a == lb.LB_NL) { return 2; }                  // LB5
+    if (b == lb.LB_BK || b == lb.LB_CR || b == lb.LB_LF || b == lb.LB_NL) { return 0; } // LB6
+    if (b == lb.LB_SP || b == lb.LB_ZW) { return 0; }                                   // LB7
+
+    // LB8: ZW SP* / (break allowed after ZW even past spaces)
+    let is i64 as z with mut = i - 1;
+    while (z >= 0 && cast(i64, _c.ptr[z]) == lb.LB_SP) { z = z - 1; }
+    if (z >= 0 && cast(i64, _c.ptr[z]) == lb.LB_ZW) { return 1; }
+
+    if (cast(i64, _c0.ptr[i - 1]) == lb.LB_ZWJ) { return 0; }                           // LB8a
+
+    // LB9: do not break before a combining mark / ZWJ glued to its base
+    if ((cast(i64, _c0.ptr[i]) == lb.LB_CM || cast(i64, _c0.ptr[i]) == lb.LB_ZWJ) && _is_brk_or_sp(a) == 0) { return 0; }
+
+    if (b == lb.LB_WJ || a == lb.LB_WJ) { return 0; }                                   // LB11
+    if (a == lb.LB_GL) { return 0; }                                                    // LB12
+    if (b == lb.LB_GL && a != lb.LB_SP && a != lb.LB_BA && a != lb.LB_HY) { return 0; } // LB12a
+
+    if (b == lb.LB_CL || b == lb.LB_CP || b == lb.LB_EX || b == lb.LB_SY) { return 0; }  // LB13
+
+    // LB14: OP SP* x
+    let is i64 as p14 = _psp(i - 1);
+    if (p14 >= 0 && cast(i64, _c.ptr[p14]) == lb.LB_OP) { return 0; }
+
+    // LB15a: (sot|BK|CR|LF|NL|OP|QU|GL|SP|ZW) [Pi&QU] SP* x
+    let is i64 as p15 = _psp(i - 1);
+    if (p15 >= 0 && cast(i64, _c.ptr[p15]) == lb.LB_QU) {
+        let is i64 as qi with mut = p15;
+        while (qi > 0 && (cast(i64, _c0.ptr[qi]) == lb.LB_CM || cast(i64, _c0.ptr[qi]) == lb.LB_ZWJ)) { qi = qi - 1; }
+        if (props.general_category(cps[qi]) == props.GC_PI) {
+            if (qi == 0) { return 0; }
+            let is i64 as before = cast(i64, _c.ptr[qi - 1]);
+            if (before == lb.LB_BK || before == lb.LB_CR || before == lb.LB_LF || before == lb.LB_NL
+                || before == lb.LB_OP || before == lb.LB_QU || before == lb.LB_GL || before == lb.LB_SP || before == lb.LB_ZW) { return 0; }
+        }
+    }
+    // LB15b: x [Pf&QU] (SP|GL|WJ|CL|QU|CP|EX|IS|SY|BK|CR|LF|NL|ZW|eot)
+    if (b == lb.LB_QU && props.general_category(cps[i]) == props.GC_PF) {
+        if (i + 1 >= n) { return 0; }
+        let is i64 as after = cast(i64, _c.ptr[i + 1]);
+        if (after == lb.LB_SP || after == lb.LB_GL || after == lb.LB_WJ || after == lb.LB_CL || after == lb.LB_QU
+            || after == lb.LB_CP || after == lb.LB_EX || after == lb.LB_IS || after == lb.LB_SY
+            || after == lb.LB_BK || after == lb.LB_CR || after == lb.LB_LF || after == lb.LB_NL || after == lb.LB_ZW) { return 0; }
+    }
+
+    // LB15c: SP / IS NU (break before a decimal mark that begins a number)
+    if (a == lb.LB_SP && b == lb.LB_IS && i + 1 < n && cast(i64, _c.ptr[i + 1]) == lb.LB_NU) { return 1; }
+    // LB15d: x IS
+    if (b == lb.LB_IS) { return 0; }
+
+    // LB16: (CL|CP) SP* x NS
+    let is i64 as p16 = _psp(i - 1);
+    if (b == lb.LB_NS && p16 >= 0 && (cast(i64, _c.ptr[p16]) == lb.LB_CL || cast(i64, _c.ptr[p16]) == lb.LB_CP)) { return 0; }
+    // LB17: B2 SP* x B2
+    if (b == lb.LB_B2 && p16 >= 0 && cast(i64, _c.ptr[p16]) == lb.LB_B2) { return 0; }
+
+    if (a == lb.LB_SP) { return 1; }                                                    // LB18
+
+    if (b == lb.LB_QU && props.general_category(cps[i]) != props.GC_PI) { return 0; }      // LB19: x [QU - Pi]
+    if (a == lb.LB_QU && props.general_category(cps[i - 1]) != props.GC_PF) { return 0; }  // LB19: [QU - Pf] x
+    // LB19a: do not break either side of a quotation unless surrounded by East Asian.
+    if (b == lb.LB_QU) {
+        let is i64 as bea with mut = 0;
+        let is i64 as aea with mut = 0;
+        if (i - 1 >= 0 && _is_ea(cps[i - 1]) == 1) { bea = 1; }
+        if (i + 1 < n && _is_ea(cps[i + 1]) == 1) { aea = 1; }
+        if (bea == 0 || aea == 0) { return 0; }
+    }
+    if (a == lb.LB_QU) {
+        let is i64 as bea with mut = 0;
+        let is i64 as aea with mut = 0;
+        if (i - 2 >= 0 && _is_ea(cps[i - 2]) == 1) { bea = 1; }
+        if (_is_ea(cps[i]) == 1) { aea = 1; }
+        if (bea == 0 || aea == 0) { return 0; }
+    }
+
+    if (b == lb.LB_CB || a == lb.LB_CB) { return 1; }                                   // LB20
+
+    // LB20a: (sot | BK|CR|LF|NL|SP|ZW|CB|GL) (HY | U+2010) x AL
+    if (b == lb.LB_AL) {
+        let is i64 as bi with mut = i - 1;
+        while (bi > 0 && (cast(i64, _c0.ptr[bi]) == lb.LB_CM || cast(i64, _c0.ptr[bi]) == lb.LB_ZWJ)) { bi = bi - 1; }
+        if (cast(i64, _c0.ptr[bi]) == lb.LB_HY || cps[bi] == 8208) {
+            if (bi == 0) { return 0; }
+            let is i64 as bef = cast(i64, _c.ptr[bi - 1]);
+            if (bef == lb.LB_BK || bef == lb.LB_CR || bef == lb.LB_LF || bef == lb.LB_NL
+                || bef == lb.LB_SP || bef == lb.LB_ZW || bef == lb.LB_CB || bef == lb.LB_GL) { return 0; }
+        }
+    }
+
+    if (b == lb.LB_BA || b == lb.LB_HY || b == lb.LB_NS) { return 0; }                  // LB21
+    if (a == lb.LB_BB) { return 0; }                                                    // LB21
+    if (i >= 2 && cast(i64, _c.ptr[i - 2]) == lb.LB_HL && (a == lb.LB_HY || a == lb.LB_BA) && b != lb.LB_HL) { return 0; }  // LB21a
+    if (a == lb.LB_SY && b == lb.LB_HL) { return 0; }                                   // LB21b
+
+    if (b == lb.LB_IN) { return 0; }                                                    // LB22
+
+    if ((a == lb.LB_AL || a == lb.LB_HL) && b == lb.LB_NU) { return 0; }                // LB23
+    if (a == lb.LB_NU && (b == lb.LB_AL || b == lb.LB_HL)) { return 0; }                // LB23
+    if (a == lb.LB_PR && (b == lb.LB_ID || b == lb.LB_EB || b == lb.LB_EM)) { return 0; }   // LB23a
+    if ((a == lb.LB_ID || a == lb.LB_EB || a == lb.LB_EM) && b == lb.LB_PO) { return 0; }   // LB23a
+    if ((a == lb.LB_PR || a == lb.LB_PO) && (b == lb.LB_AL || b == lb.LB_HL)) { return 0; } // LB24
+    if ((a == lb.LB_AL || a == lb.LB_HL) && (b == lb.LB_PR || b == lb.LB_PO)) { return 0; } // LB24
+
+    // LB25 (numbers, Unicode 16.0 pair rules with number context)
+    if ((a == lb.LB_PR || a == lb.LB_PO || a == lb.LB_HY || a == lb.LB_IS) && b == lb.LB_NU) { return 0; }
+    if ((b == lb.LB_NU || b == lb.LB_SY || b == lb.LB_IS || b == lb.LB_CL || b == lb.LB_CP) && _num_before(i - 1) == 1) { return 0; }
+    if (b == lb.LB_PO || b == lb.LB_PR) {
+        if (_num_before(i - 1) == 1) { return 0; }
+        if ((a == lb.LB_CL || a == lb.LB_CP) && _num_before(i - 2) == 1) { return 0; }
+    }
+    if ((a == lb.LB_PR || a == lb.LB_PO) && b == lb.LB_OP) {
+        if (i + 1 < n && cast(i64, _c.ptr[i + 1]) == lb.LB_NU) { return 0; }
+        if (i + 2 < n && cast(i64, _c.ptr[i + 1]) == lb.LB_IS && cast(i64, _c.ptr[i + 2]) == lb.LB_NU) { return 0; }
+    }
+
+    // LB26/LB27 (Hangul)
+    if (a == lb.LB_JL && (b == lb.LB_JL || b == lb.LB_JV || b == lb.LB_H2 || b == lb.LB_H3)) { return 0; }
+    if ((a == lb.LB_JV || a == lb.LB_H2) && (b == lb.LB_JV || b == lb.LB_JT)) { return 0; }
+    if ((a == lb.LB_JT || a == lb.LB_H3) && b == lb.LB_JT) { return 0; }
+    if ((a == lb.LB_JL || a == lb.LB_JV || a == lb.LB_JT || a == lb.LB_H2 || a == lb.LB_H3) && (b == lb.LB_PO)) { return 0; }   // LB27
+    if (a == lb.LB_PR && (b == lb.LB_JL || b == lb.LB_JV || b == lb.LB_JT || b == lb.LB_H2 || b == lb.LB_H3)) { return 0; }     // LB27
+
+    if ((a == lb.LB_AL || a == lb.LB_HL) && (b == lb.LB_AL || b == lb.LB_HL)) { return 0; }   // LB28
+
+    // LB28a (Brahmic)
+    if (a == lb.LB_AP && _aksara(cps, i) == 1) { return 0; }
+    if (_aksara_left(cps, i - 1) == 1 && (b == lb.LB_VF || b == lb.LB_VI)) { return 0; }
+    if (a == lb.LB_VI && _aksara(cps, i) == 1) {
+        let is i64 as vi with mut = i - 1;
+        while (vi > 0 && (cast(i64, _c0.ptr[vi]) == lb.LB_CM || cast(i64, _c0.ptr[vi]) == lb.LB_ZWJ)) { vi = vi - 1; }
+        let is i64 as bp with mut = vi - 1;
+        while (bp > 0 && (cast(i64, _c0.ptr[bp]) == lb.LB_CM || cast(i64, _c0.ptr[bp]) == lb.LB_ZWJ)) { bp = bp - 1; }
+        if (bp >= 0 && _aksara(cps, bp) == 1) { return 0; }
+    }
+    if (_aksara_left(cps, i - 1) == 1 && _aksara(cps, i) == 1 && i + 1 < n && cast(i64, _c.ptr[i + 1]) == lb.LB_VF) { return 0; }
+
+    if (a == lb.LB_IS && (b == lb.LB_AL || b == lb.LB_HL)) { return 0; }                // LB29
+
+    // LB30
+    if ((a == lb.LB_AL || a == lb.LB_HL || a == lb.LB_NU) && b == lb.LB_OP && _is_ea(cps[i]) == 0) { return 0; }
+    if (a == lb.LB_CP && _is_ea(cps[i - 1]) == 0 && (b == lb.LB_AL || b == lb.LB_HL || b == lb.LB_NU)) { return 0; }
+
+    // LB30a: RI RI pairs
+    if (a == lb.LB_RI && b == lb.LB_RI) {
+        let is i64 as cnt with mut = 0;
+        let is i64 as j with mut = i - 1;
+        let is i64 as stop with mut = 0;
+        while (j >= 0 && stop == 0) {
+            let is i64 as c0 = cast(i64, _c0.ptr[j]);
+            if (c0 == lb.LB_CM || c0 == lb.LB_ZWJ) { j = j - 1; }
+            else if (c0 == lb.LB_RI) { cnt = cnt + 1; j = j - 1; }
+            else { stop = 1; }
+        }
+        if ((cnt & 1) == 1) { return 0; }
+    }
+    // LB30b: EB x EM ; [Extended_Pictographic & Cn] x EM
+    if (a == lb.LB_EB && b == lb.LB_EM) { return 0; }
+    if (b == lb.LB_EM && ep.extpict_get(cps[i - 1]) == 1 && props.general_category(cps[i - 1]) == props.GC_CN) { return 0; }
+
+    return 1;                                                                           // LB31
+}
+
+// Fill brk[0..n): break opportunity before each position. brk[0]=0 (sot).
+fn line_break_fill(cps as *i32, n as i64, brk as *u8) as i64 {
+    if (n <= 0) { return 0; }
+    _ensure();
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i64 as r = _resolve(cps[i]);
+        buf.bytebuf_push(&_c0, cast(u8, r));
+        buf.bytebuf_push(&_c, cast(u8, r));
+        i = i + 1;
+    }
+    // LB9/LB10: attach CM/ZWJ to base, leftover -> AL.
+    i = 0;
+    while (i < n) {
+        let is i64 as c = cast(i64, _c.ptr[i]);
+        if (c == lb.LB_CM || c == lb.LB_ZWJ) {
+            if (i > 0 && _is_brk_or_sp(cast(i64, _c.ptr[i - 1])) == 0) { _c.ptr[i] = _c.ptr[i - 1]; }
+            else { _c.ptr[i] = cast(u8, lb.LB_AL); }
+        }
+        i = i + 1;
+    }
+    brk[0] = cast(u8, 0);
+    i = 1;
+    while (i < n) {
+        brk[i] = cast(u8, _bb(cps, n, i));
+        i = i + 1;
+    }
+    return n;
+}
+
+// Opportunity before position i (recomputes the whole line).
+fn line_break_at(cps as *i32, n as i64, i as i64) as i64 {
+    if (i <= 0 || i >= n) { return LB_PROHIBITED; }
+    let is buf.ByteBuf as brk = buf.bytebuf_new(n + 1);
+    line_break_fill(cps, n, brk.ptr);
+    let is i64 as r = cast(i64, brk.ptr[i]);
+    buf.bytebuf_free(&brk);
+    return r;
+}
