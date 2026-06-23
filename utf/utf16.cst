@@ -43,6 +43,24 @@ fn validate(units as *u16, n as i64) as i64 {
     return 0;
 }
 
+// Encode n code points into the caller's u16 buffer (capacity `cap` units).
+// Returns units written, or 0 - UERR_NOSPACE / 0 - UERR_RANGE.
+fn from_cps(cps as *i32, n as i64, out as *u16, cap as i64) as i64 {
+    let is [2]u16 as tmp;
+    let is i64 as w with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i64 as k = encode1(cps[i], cast(*u16, &tmp));
+        if (k < 0) { return k; }
+        if (w + k > cap) { return 0 - errno.UERR_NOSPACE; }
+        out[w] = tmp[0];
+        if (k == 2) { out[w + 1] = tmp[1]; }
+        w = w + k;
+        i = i + 1;
+    }
+    return w;
+}
+
 fn to_cps(units as *u16, n as i64, out as *buf.CpBuf) as i64 {
     let is i64 as i with mut = 0;
     let is i64 as c with mut = 0;

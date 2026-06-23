@@ -50,5 +50,9 @@ fn main() as i32 {
     // Grapheme break (GraphemeBreakProperty.txt)
     if (props.grapheme_break(769) != gcb.GCB_Extend) { return 24; }   // U+0301
 
+    // Bidi @missing default: U+0590 is UNASSIGNED but in the Hebrew block,
+    // so DerivedBidiClass's "@missing: 0590..05FF; Right_To_Left" makes it R.
+    if (props.bidi_class(1424) != bidi.BIDI_R) { return 25; }         // U+0590 reserved
+
     return 0;
 }

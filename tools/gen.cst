@@ -384,6 +384,34 @@ fn find_char(p as *u8, start as i32, end as i32, ch as i32) as i32 {
     return cast(i32, 0 - 1);
 }
 
+// 1 if p[s..e) equals the NUL-terminated cstr t exactly.
+fn slice_eq(p as *u8, s as i32, e as i32, t as *u8) as i32 {
+    let is i32 as n = e - s;
+    let is i32 as i with mut = 0;
+    while (i < n) {
+        if (t[i] == 0) { return 0; }
+        if (p[s + i] != t[i]) { return 0; }
+        i = i + 1;
+    }
+    if (t[n] != 0) { return 0; }
+    return 1;
+}
+
+// Index of cstr t inside p[start..end), or -1.
+fn find_substr(p as *u8, start as i32, end as i32, t as *u8) as i32 {
+    let is i32 as tn with mut = 0;
+    while (t[tn] != 0) { tn = tn + 1; }
+    if (tn == 0) { return start; }
+    let is i32 as i with mut = start;
+    while (i + tn <= end) {
+        let is i32 as j with mut = 0;
+        while (j < tn && p[i + j] == t[j]) { j = j + 1; }
+        if (j == tn) { return i; }
+        i = i + 1;
+    }
+    return cast(i32, 0 - 1);
+}
+
 fn parse_dec(p as *u8, start as i32, end as i32) as i32 {
     let is i32 as v with mut = 0;
     let is i32 as i with mut = start;
@@ -540,6 +568,91 @@ fn gen_ccc() as i32 {
     return build_and_emit("ucd/tables/ccc.cst", "ccc", "CCC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
+// ---- Bidi_Class (DerivedBidiClass.txt) ----
+// Unlike the other property files, this one gives the default class of
+// UNASSIGNED code points through "# @missing: RANGE; LongName" lines, and
+// the explicit body uses short names (L, R, AL, ...). We must apply the
+// @missing defaults AND map the long names to the short ones, or every
+// reserved code point in an RTL block would wrongly resolve to L.
+
+// Map a Bidi_Class value name to its canonical short form (writes to out,
+// returns length). The four long forms below are the ones used by @missing
+// in Unicode 16.0; everything else (the short body names) is copied as-is.
+fn bidi_canon(p as *u8, s as i32, e as i32, out as *u8) as i32 {
+    if (slice_eq(p, s, e, "Left_To_Right") == 1)       { out[0] = 76; return 1; }               // L
+    if (slice_eq(p, s, e, "Right_To_Left") == 1)       { out[0] = 82; return 1; }               // R
+    if (slice_eq(p, s, e, "Arabic_Letter") == 1)       { out[0] = 65; out[1] = 76; return 2; }  // AL
+    if (slice_eq(p, s, e, "European_Terminator") == 1) { out[0] = 69; out[1] = 84; return 2; }  // ET
+    let is i32 as n = e - s;
+    let is i32 as i with mut = 0;
+    while (i < n) { out[i] = p[s + i]; i = i + 1; }
+    return n;
+}
+
+fn gen_bidi() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/DerivedBidiClass.txt", &len);
+    if (cast(i64, p) == 0) {
+        io.write_str(1, "gen: cannot read tools/ucd/DerivedBidiClass.txt\n");
+        return cast(i32, 0 - 1);
+    }
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+
+    let is map.MapStr as nm = map.mapstr_new();
+    let is [512]i64 as names_arr with mut;
+    let is Interner as it;
+    it.map = &nm;
+    it.arena = mem.core.mmap_anon(65536);
+    it.aoff = 0;
+    it.names = cast(*i64, &names_arr);
+    it.count = 0;
+    let is [64]u8 as cbuf;
+    intern(&it, "L", 0, 1);   // default Bidi_Class = L => id 0 (zero-filled flat)
+
+    // Single forward pass: @missing comment lines precede the explicit body
+    // in the UCD file, so defaults are applied before the assignments that
+    // override them.
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as rs with mut = cast(i32, 0 - 1);   // where the "RANGE; value" starts
+            if (lp[0] == 35) {                              // 35 = '#'
+                let is i32 as mi = find_substr(lp, 0, llen, "@missing:");
+                if (mi >= 0) { rs = mi + 9; }               // 9 = len("@missing:")
+            } else {
+                rs = 0;
+            }
+            if (rs >= 0) {
+                let is i32 as semi = find_char(lp, rs, llen, 59);   // ';'
+                if (semi >= 0) {
+                    let is i32 as lo with mut = 0;
+                    let is i32 as hi with mut = 0;
+                    parse_range(lp, rs, semi, &lo, &hi);
+                    let is i32 as vs with mut = semi + 1;
+                    let is i32 as ve with mut = llen;
+                    let is i32 as hh = find_char(lp, vs, llen, 35);
+                    if (hh >= 0) { ve = hh; }
+                    while (vs < ve && (lp[vs] == 32 || lp[vs] == 9)) { vs = vs + 1; }
+                    while (ve > vs && (lp[ve - 1] == 32 || lp[ve - 1] == 9 || lp[ve - 1] == 13)) { ve = ve - 1; }
+                    if (ve > vs && lo >= 0 && hi >= lo && hi < NUMCP) {
+                        let is i32 as cl = bidi_canon(lp, vs, ve, cast(*u8, &cbuf));
+                        let is i32 as id = intern(&it, cast(*u8, &cbuf), 0, cl);
+                        let is i32 as c with mut = lo;
+                        while (c <= hi) { flat[c] = cast(u16, id); c = c + 1; }
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    io.write_str(1, "bidi:");
+    return build_and_emit("ucd/tables/bidi.cst", "bidi", "BIDI", flat, 0, U_MAXCP, it.names, it.count);
+}
+
 fn main() as i32 {
     if (gen_gc() < 0)  { return 1; }
     if (gen_ccc() < 0) { return 2; }
@@ -549,7 +662,7 @@ fn main() as i32 {
     if (gen_enum_file("tools/ucd/GraphemeBreakProperty.txt", "ucd/tables/gcb.cst", "gcb", "GCB", "Other", U_MAXCP) < 0) { return 6; }
     if (gen_enum_file("tools/ucd/WordBreakProperty.txt", "ucd/tables/wb.cst", "wb", "WB", "Other", U_MAXCP) < 0) { return 7; }
     if (gen_enum_file("tools/ucd/SentenceBreakProperty.txt", "ucd/tables/sb.cst", "sb", "SB", "Other", U_MAXCP) < 0) { return 8; }
-    if (gen_enum_file("tools/ucd/DerivedBidiClass.txt", "ucd/tables/bidi.cst", "bidi", "BIDI", "L", U_MAXCP) < 0) { return 9; }
+    if (gen_bidi() < 0) { return 9; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }
