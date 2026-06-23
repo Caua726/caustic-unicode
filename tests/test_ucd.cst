@@ -6,7 +6,11 @@
 // Exit 0 = all pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../ucd/props.cst" as props;
+use "../ucd/props.cst"        as props;
+use "../ucd/tables/script.cst" as scr;
+use "../ucd/tables/eaw.cst"    as eaw;
+use "../ucd/tables/bidi.cst"   as bidi;
+use "../ucd/tables/gcb.cst"    as gcb;
 
 fn main() as i32 {
     if (props.general_category(65)       != props.GC_LU) { return 1; }   // 'A' U+0041
@@ -25,6 +29,26 @@ fn main() as i32 {
     if (props.is_letter(48)  != 0) { return 12; }
     if (props.is_digit(48)   != 1) { return 13; }
     if (props.is_digit(65)   != 0) { return 14; }
+
+    // combining class (UnicodeData field 3)
+    if (props.combining_class(769) != 230) { return 15; }   // U+0301 acute = 230
+    if (props.combining_class(65)  != 0)   { return 16; }   // 'A' = 0
+
+    // script (Scripts.txt)
+    if (props.script(65)    != scr.SC_Latin) { return 17; }   // 'A'
+    if (props.script(913)   != scr.SC_Greek) { return 18; }   // U+0391 Alpha
+    if (props.script(20104) != scr.SC_Han)   { return 19; }   // U+4E00
+
+    // East Asian Width (EastAsianWidth.txt)
+    if (props.east_asian_width(20104) != eaw.EAW_W)  { return 20; }   // CJK wide
+    if (props.east_asian_width(65)    != eaw.EAW_Na) { return 21; }   // 'A' narrow
+
+    // Bidi class (DerivedBidiClass.txt)
+    if (props.bidi_class(1488) != bidi.BIDI_R) { return 22; }   // U+05D0 Hebrew alef
+    if (props.bidi_class(65)   != bidi.BIDI_L) { return 23; }   // 'A'
+
+    // Grapheme break (GraphemeBreakProperty.txt)
+    if (props.grapheme_break(769) != gcb.GCB_Extend) { return 24; }   // U+0301
 
     return 0;
 }

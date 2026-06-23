@@ -13,6 +13,9 @@
 // under the assembler's ~32 KB per-directive limit.
 // =======================================================
 
+// Chunk size (decoded bytes) of each table blob. Tables live directly in
+// .rodata as string-init *u8 globals (bytes written as \xNN); the chunk
+// pointer array just points at them — no runtime decode.
 let is i32 as CHUNK_BYTES with imut = 4096;
 
 // Read little-endian u16 element `i` from a chunked byte blob.

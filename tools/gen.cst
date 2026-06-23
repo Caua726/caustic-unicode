@@ -187,6 +187,9 @@ fn hex_digit(v as i32) as u8 {
     return cast(u8, 87 + v);                          // 'a'..'f'
 }
 
+// Emit one byte as a \xNN hex escape into a string literal. The bytes land
+// in .rodata via the string-init global (codegen NUL emission was fixed in
+// the Caustic compiler, so raw bytes round-trip cleanly).
 fn emit_byte_hex(w as *io.Writer, b as u8) as void {
     io.put(w, 92);                                    // '\'
     io.put(w, 120);                                   // 'x'
@@ -254,7 +257,7 @@ fn emit_tail(w as *io.Writer, name as *u8, nidx as i32, ndat as i32, maxcp as i3
 
 // Build the trie from a filled flat[NUMCP] array and write <path>.
 // `name` is the table prefix used for every generated symbol.
-fn build_and_emit(path as *u8, name as *u8, flat as *u16, def as i32, maxcp as i32) as i32 {
+fn build_and_emit(path as *u8, name as *u8, prefix as *u8, flat as *u16, def as i32, maxcp as i32, names as *i64, ncount as i32) as i32 {
     let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
     let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
     if (cast(i64, index) == 0 || cast(i64, data) == 0) { return cast(i32, 0 - 1); }
@@ -297,6 +300,13 @@ fn build_and_emit(path as *u8, name as *u8, flat as *u16, def as i32, maxcp as i
     let is i32 as nidx = emit_u16_blob(&w, name, "_index", index, NBLOCKS);
     let is i32 as ndat = emit_u16_blob(&w, name, "_data", data, data_count);
     emit_tail(&w, name, nidx, ndat, maxcp, def);
+    // Named value constants (<PREFIX>_<Name> = id) for interned enum tables.
+    let is i32 as ci with mut = 0;
+    while (ci < ncount) {
+        ws(&w, "let is i64 as "); ws(&w, prefix); io.put(&w, 95);
+        ws(&w, cast(*u8, names[ci])); ws(&w, " with imut = "); wi(&w, ci); ws(&w, ";\n");
+        ci = ci + 1;
+    }
     io.flush(&w);
     io._close_fd(fd);
 
@@ -354,11 +364,192 @@ fn gen_gc() as i32 {
     }
 
     io.write_str(1, "gc:");
-    return build_and_emit("ucd/tables/gc.cst", "gc", flat, 0, U_MAXCP);
+    return build_and_emit("ucd/tables/gc.cst", "gc", "GC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+}
+
+// ---- generic enum-property files ("RANGE ; Value # comment") ----
+
+fn cstrlen(s as *u8) as i32 {
+    let is i32 as i with mut = 0;
+    while (s[i] != 0) { i = i + 1; }
+    return i;
+}
+
+fn find_char(p as *u8, start as i32, end as i32, ch as i32) as i32 {
+    let is i32 as i with mut = start;
+    while (i < end) {
+        if (cast(i32, p[i]) == ch) { return i; }
+        i = i + 1;
+    }
+    return cast(i32, 0 - 1);
+}
+
+fn parse_dec(p as *u8, start as i32, end as i32) as i32 {
+    let is i32 as v with mut = 0;
+    let is i32 as i with mut = start;
+    while (i < end) {
+        if (p[i] < 48 || p[i] > 57) { return v; }
+        v = v * 10 + (cast(i32, p[i]) - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Parse "HHHH" or "HHHH..HHHH" in p[start..end) (spaces trimmed) -> *lo,*hi.
+fn parse_range(p as *u8, start as i32, end as i32, lo as *i32, hi as *i32) as void {
+    let is i32 as s with mut = start;
+    let is i32 as e with mut = end;
+    while (s < e && (p[s] == 32 || p[s] == 9)) { s = s + 1; }
+    while (e > s && (p[e - 1] == 32 || p[e - 1] == 9)) { e = e - 1; }
+    let is i32 as dot with mut = cast(i32, 0 - 1);
+    let is i32 as i with mut = s;
+    while (i < e - 1) {
+        if (p[i] == 46 && p[i + 1] == 46) { dot = i; i = e; }   // 46 = '.'
+        else { i = i + 1; }
+    }
+    if (dot < 0) {
+        let is i32 as cp = parse_hex(p, s, e);
+        lo[0] = cp; hi[0] = cp;
+    } else {
+        lo[0] = parse_hex(p, s, dot);
+        hi[0] = parse_hex(p, dot + 2, e);
+    }
+}
+
+// Value-name interner: assigns ids in first-seen order (default = 0).
+// Keys point into a stable mmap'd arena (MapStr stores the pointer).
+struct Interner {
+    map   as *map.MapStr;
+    arena as *u8;
+    aoff  as i32;
+    names as *i64;      // id -> arena cstr pointer (for constant emission)
+    count as i32;
+}
+
+fn intern(it as *Interner, p as *u8, start as i32, end as i32) as i32 {
+    let is i32 as n = end - start;
+    let is *u8 as dst = cast(*u8, cast(i64, it.arena) + cast(i64, it.aoff));
+    let is i32 as j with mut = 0;
+    while (j < n) { dst[j] = p[start + j]; j = j + 1; }
+    dst[n] = cast(u8, 0);
+    let is i64 as found = map.mapstr_get(it.map, dst, cast(i64, 0 - 1));
+    if (found >= 0) { return cast(i32, found); }   // dst stays scratch, reused
+    let is i32 as id = it.count;
+    it.names[id] = cast(i64, dst);
+    map.mapstr_set(it.map, dst, cast(i64, id));
+    it.aoff = it.aoff + n + 1;                      // commit the bytes
+    it.count = it.count + 1;
+    return id;
+}
+
+fn gen_enum_file(in_path as *u8, out_path as *u8, name as *u8, prefix as *u8,
+                 default_name as *u8, maxcp as i32) as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp(in_path, &len);
+    if (cast(i64, p) == 0) {
+        io.write_str(1, "gen: cannot read "); io.write_str(1, in_path); io.write_str(1, "\n");
+        return cast(i32, 0 - 1);
+    }
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+
+    let is map.MapStr as nm = map.mapstr_new();
+    let is [512]i64 as names_arr with mut;
+    let is Interner as it;
+    it.map = &nm;
+    it.arena = mem.core.mmap_anon(65536);
+    it.aoff = 0;
+    it.names = cast(*i64, &names_arr);
+    it.count = 0;
+    intern(&it, default_name, 0, cstrlen(default_name));   // default => id 0
+
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            if (lp[0] != 35) {                                 // 35 = '#'
+                let is i32 as semi = find_char(lp, 0, llen, 59);   // ';'
+                if (semi >= 0) {
+                    let is i32 as lo with mut = 0;
+                    let is i32 as hi with mut = 0;
+                    parse_range(lp, 0, semi, &lo, &hi);
+                    let is i32 as vs with mut = semi + 1;
+                    let is i32 as ve with mut = llen;
+                    let is i32 as hh = find_char(lp, vs, llen, 35);
+                    if (hh >= 0) { ve = hh; }
+                    while (vs < ve && (lp[vs] == 32 || lp[vs] == 9)) { vs = vs + 1; }
+                    while (ve > vs && (lp[ve - 1] == 32 || lp[ve - 1] == 9 || lp[ve - 1] == 13)) { ve = ve - 1; }
+                    if (ve > vs && lo >= 0 && hi >= lo && hi < NUMCP) {
+                        let is i32 as id = intern(&it, lp, vs, ve);
+                        let is i32 as c with mut = lo;
+                        while (c <= hi) { flat[c] = cast(u16, id); c = c + 1; }
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    io.write_str(1, name); io.write_str(1, ":");
+    return build_and_emit(out_path, name, prefix, flat, 0, maxcp, it.names, it.count);
+}
+
+// ---- Canonical_Combining_Class (UnicodeData.txt field 3, decimal) ----
+
+fn gen_ccc() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/UnicodeData.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as pending with mut = cast(i32, 0 - 1);
+    let is i32 as pending_cc with mut = 0;
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as f1e with mut = 0;
+            let is i32 as f1s = field(lp, llen, 1, &f1e);
+            let is i32 as f3e with mut = 0;
+            let is i32 as f3s = field(lp, llen, 3, &f3e);
+            if (f0s >= 0 && f1s >= 0 && f3s >= 0) {
+                let is i32 as cp = parse_hex(lp, f0s, f0e);
+                let is i32 as cc = parse_dec(lp, f3s, f3e);
+                if (ends_with(lp, f1s, f1e, "First>", 6) == 1) {
+                    pending = cp; pending_cc = cc;
+                } else if (ends_with(lp, f1s, f1e, "Last>", 5) == 1) {
+                    if (pending >= 0) {
+                        let is i32 as c with mut = pending;
+                        while (c <= cp) { flat[c] = cast(u16, pending_cc); c = c + 1; }
+                        pending = cast(i32, 0 - 1);
+                    }
+                } else {
+                    if (cp >= 0 && cp < NUMCP) { flat[cp] = cast(u16, cc); }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    io.write_str(1, "ccc:");
+    return build_and_emit("ucd/tables/ccc.cst", "ccc", "CCC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 fn main() as i32 {
-    if (gen_gc() < 0) { return 1; }
+    if (gen_gc() < 0)  { return 1; }
+    if (gen_ccc() < 0) { return 2; }
+    if (gen_enum_file("tools/ucd/Scripts.txt", "ucd/tables/script.cst", "script", "SC", "Unknown", U_MAXCP) < 0) { return 3; }
+    if (gen_enum_file("tools/ucd/EastAsianWidth.txt", "ucd/tables/eaw.cst", "eaw", "EAW", "N", U_MAXCP) < 0) { return 4; }
+    if (gen_enum_file("tools/ucd/LineBreak.txt", "ucd/tables/lb.cst", "lb", "LB", "XX", U_MAXCP) < 0) { return 5; }
+    if (gen_enum_file("tools/ucd/GraphemeBreakProperty.txt", "ucd/tables/gcb.cst", "gcb", "GCB", "Other", U_MAXCP) < 0) { return 6; }
+    if (gen_enum_file("tools/ucd/WordBreakProperty.txt", "ucd/tables/wb.cst", "wb", "WB", "Other", U_MAXCP) < 0) { return 7; }
+    if (gen_enum_file("tools/ucd/SentenceBreakProperty.txt", "ucd/tables/sb.cst", "sb", "SB", "Other", U_MAXCP) < 0) { return 8; }
+    if (gen_enum_file("tools/ucd/DerivedBidiClass.txt", "ucd/tables/bidi.cst", "bidi", "BIDI", "L", U_MAXCP) < 0) { return 9; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }

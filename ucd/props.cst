@@ -5,7 +5,15 @@
 // property's default (e.g. GC_CN). No allocation, no errors.
 // =======================================================
 
-use "tables/gc.cst" as gc;
+use "tables/gc.cst"     as gc;
+use "tables/ccc.cst"    as ccc;
+use "tables/script.cst" as scr;
+use "tables/eaw.cst"    as eaw;
+use "tables/lb.cst"     as lb;
+use "tables/gcb.cst"    as gcb;
+use "tables/wb.cst"     as wb;
+use "tables/sb.cst"     as sb;
+use "tables/bidi.cst"   as bidi;
 
 // General_Category values — MUST match tools/gen.cst:gc_id().
 let is i64 as GC_CN with imut = 0;    // Unassigned (default)
@@ -56,3 +64,27 @@ fn is_digit(cp as i32) as i64 {
     if (general_category(cp) == GC_ND) { return 1; }
     return 0;
 }
+
+// Canonical_Combining_Class (0..254). Value constants are the numbers.
+fn combining_class(cp as i32) as i64 { return cast(i64, ccc.ccc_get(cp)); }
+
+// Script id (see ucd/tables/script.cst SC_* constants).
+fn script(cp as i32) as i64 { return cast(i64, scr.script_get(cp)); }
+
+// East_Asian_Width id (EAW_* in ucd/tables/eaw.cst).
+fn east_asian_width(cp as i32) as i64 { return cast(i64, eaw.eaw_get(cp)); }
+
+// Line_Break id (LB_* in ucd/tables/lb.cst).
+fn line_break(cp as i32) as i64 { return cast(i64, lb.lb_get(cp)); }
+
+// Grapheme_Cluster_Break id (GCB_* in ucd/tables/gcb.cst).
+fn grapheme_break(cp as i32) as i64 { return cast(i64, gcb.gcb_get(cp)); }
+
+// Word_Break id (WB_* in ucd/tables/wb.cst).
+fn word_break(cp as i32) as i64 { return cast(i64, wb.wb_get(cp)); }
+
+// Sentence_Break id (SB_* in ucd/tables/sb.cst).
+fn sentence_break(cp as i32) as i64 { return cast(i64, sb.sb_get(cp)); }
+
+// Bidi_Class id (BIDI_* in ucd/tables/bidi.cst).
+fn bidi_class(cp as i32) as i64 { return cast(i64, bidi.bidi_get(cp)); }
