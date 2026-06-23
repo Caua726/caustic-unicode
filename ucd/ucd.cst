@@ -1,0 +1,7 @@
+// =======================================================
+// caustic-unicode/ucd — code-point property lookups (subtree facade).
+// Re-exports the public property surface. The trie reader and the
+// generated tables/ are internal implementation detail.
+// =======================================================
+
+use "props.cst" as props;

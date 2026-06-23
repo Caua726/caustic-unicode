@@ -1,0 +1,49 @@
+// =======================================================
+// tests/test_buf.cst — de-risks the CpBuf/ByteBuf keystone (the
+// growable output buffer every higher module writes into).
+// Exit 0 = all pass. Non-zero = the numbered check that failed.
+// =======================================================
+
+use "../core/buf.cst" as buf;
+
+fn main() as i32 {
+    // ---- CpBuf: push beyond initial cap forces a grow ----
+    let is buf.CpBuf as b = buf.cpbuf_new(4);
+    let is i64 as i with mut = 0;
+    while (i < 10) {
+        if (buf.cpbuf_push(&b, cast(i32, i * 7)) < 0) { return 1; }
+        i = i + 1;
+    }
+    if (b.len != 10) { return 2; }
+    if (b.cap < 10) { return 3; }               // must have grown past 4
+    if (buf.cpbuf_get(&b, 0) != 0) { return 4; }
+    if (buf.cpbuf_get(&b, 9) != 63) { return 5; }   // 9 * 7
+
+    // ---- CpBuf: append a run ----
+    let is [3]i32 as more;
+    more[0] = 100; more[1] = 200; more[2] = 300;
+    if (buf.cpbuf_append(&b, cast(*i32, &more), 3) < 0) { return 6; }
+    if (b.len != 13) { return 7; }
+    if (buf.cpbuf_get(&b, 12) != 300) { return 8; }
+
+    // ---- CpBuf: high code point survives a full i32 round-trip ----
+    if (buf.cpbuf_push(&b, cast(i32, 128512)) < 0) { return 9; }   // U+1F600
+    if (buf.cpbuf_get(&b, 13) != 128512) { return 10; }
+
+    // ---- CpBuf: reset clears len, keeps capacity ----
+    buf.cpbuf_reset(&b);
+    if (b.len != 0) { return 11; }
+    buf.cpbuf_free(&b);
+
+    // ---- ByteBuf: push + append + grow ----
+    let is buf.ByteBuf as bb = buf.bytebuf_new(2);
+    if (buf.bytebuf_push(&bb, cast(u8, 65)) < 0) { return 12; }    // 'A'
+    if (buf.bytebuf_append(&bb, "BCDEF", 5) < 0) { return 13; }
+    if (bb.len != 6) { return 14; }
+    if (bb.ptr[0] != 65) { return 15; }
+    if (bb.ptr[5] != 70) { return 16; }                            // 'F'
+    if (bb.ptr[3] != 68) { return 17; }                            // 'D'
+    buf.bytebuf_free(&bb);
+
+    return 0;
+}

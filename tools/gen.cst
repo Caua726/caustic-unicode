@@ -1,0 +1,364 @@
+// =======================================================
+// caustic-unicode/tools/gen.cst
+// Offline table generator (pure Caustic). Parses the UCD text files
+// in tools/ucd/ and emits two-level code-point tries as .cst source
+// into ucd/tables/. Run from the repo root:
+//   bash tools/fetch.sh
+//   caustic tools/gen.cst -o build/gen && ./build/gen
+//
+// PHASE 1 canary: emits ucd/tables/gc.cst (General_Category) to prove
+// the whole UnicodeData -> trie -> \xNN blob -> runtime pipeline.
+// =======================================================
+
+use "std/io.cst"     as io;
+use "std/string.cst" as string;
+use "std/mem.cst"    as mem;
+use "std/map.cst"    as map;
+
+let is i32 as NUMCP   with imut = 1114112;   // 0x110000 code points
+let is i32 as NBLOCKS with imut = 34816;     // NUMCP / 32
+let is i32 as U_MAXCP with imut = 1114111;   // 0x10FFFF
+
+// ---- low-level text parsing -------------------------------------
+
+// Index of the next '\n' at/after pos, or len if none.
+fn line_end(p as *u8, len as i32, pos as i32) as i32 {
+    let is i32 as i with mut = pos;
+    while (i < len) {
+        if (p[i] == 10) { return i; }
+        i = i + 1;
+    }
+    return len;
+}
+
+// Start offset of ';'-separated field `idx` in line[0..llen); writes the
+// field end (exclusive) to *endout. Returns -1 if the field is absent.
+fn field(p as *u8, llen as i32, idx as i32, endout as *i32) as i32 {
+    let is i32 as cur with mut = 0;
+    let is i32 as i with mut = 0;
+    let is i32 as fstart with mut = 0;
+    while (cur < idx) {
+        while (i < llen && p[i] != 59) { i = i + 1; }   // 59 = ';'
+        if (i >= llen) { return cast(i32, 0 - 1); }
+        i = i + 1;
+        cur = cur + 1;
+        fstart = i;
+    }
+    let is i32 as e with mut = fstart;
+    while (e < llen && p[e] != 59) { e = e + 1; }
+    endout[0] = e;
+    return fstart;
+}
+
+fn hexval(c as u8) as i32 {
+    if (c >= 48 && c <= 57)  { return cast(i32, c) - 48; }
+    if (c >= 65 && c <= 70)  { return cast(i32, c) - 55; }
+    if (c >= 97 && c <= 102) { return cast(i32, c) - 87; }
+    return cast(i32, 0 - 1);
+}
+
+// Parse hex digits in p[start..end). Returns -1 on a bad digit.
+fn parse_hex(p as *u8, start as i32, end as i32) as i32 {
+    let is i32 as v with mut = 0;
+    let is i32 as i with mut = start;
+    if (start >= end) { return cast(i32, 0 - 1); }
+    while (i < end) {
+        let is i32 as d = hexval(p[i]);
+        if (d < 0) { return cast(i32, 0 - 1); }
+        v = (v << 4) | d;
+        i = i + 1;
+    }
+    return v;
+}
+
+// 1 if p[start..end) ends with the cstr `suf` (suflen bytes), else 0.
+fn ends_with(p as *u8, start as i32, end as i32, suf as *u8, suflen as i32) as i32 {
+    if (end - start < suflen) { return 0; }
+    let is i32 as i with mut = 0;
+    while (i < suflen) {
+        if (p[end - suflen + i] != suf[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// General_Category 2-letter code -> numeric id. MUST match ucd/props.cst.
+// Cn = 0 (default / unassigned). Returns 0 for anything unrecognized.
+fn gc_id(p as *u8, start as i32, end as i32) as i32 {
+    if (end - start < 2) { return 0; }
+    let is u8 as a = p[start];
+    let is u8 as b = p[start + 1];
+    if (a == 76) {                                   // 'L'
+        if (b == 117) { return 1; }                  // Lu
+        if (b == 108) { return 2; }                  // Ll
+        if (b == 116) { return 3; }                  // Lt
+        if (b == 109) { return 4; }                  // Lm
+        if (b == 111) { return 5; }                  // Lo
+    }
+    if (a == 77) {                                   // 'M'
+        if (b == 110) { return 6; }                  // Mn
+        if (b == 99)  { return 7; }                  // Mc
+        if (b == 101) { return 8; }                  // Me
+    }
+    if (a == 78) {                                   // 'N'
+        if (b == 100) { return 9; }                  // Nd
+        if (b == 108) { return 10; }                 // Nl
+        if (b == 111) { return 11; }                 // No
+    }
+    if (a == 80) {                                   // 'P'
+        if (b == 99)  { return 12; }                 // Pc
+        if (b == 100) { return 13; }                 // Pd
+        if (b == 115) { return 14; }                 // Ps
+        if (b == 101) { return 15; }                 // Pe
+        if (b == 105) { return 16; }                 // Pi
+        if (b == 102) { return 17; }                 // Pf
+        if (b == 111) { return 18; }                 // Po
+    }
+    if (a == 83) {                                   // 'S'
+        if (b == 109) { return 19; }                 // Sm
+        if (b == 99)  { return 20; }                 // Sc
+        if (b == 107) { return 21; }                 // Sk
+        if (b == 111) { return 22; }                 // So
+    }
+    if (a == 90) {                                   // 'Z'
+        if (b == 115) { return 23; }                 // Zs
+        if (b == 108) { return 24; }                 // Zl
+        if (b == 112) { return 25; }                 // Zp
+    }
+    if (a == 67) {                                   // 'C'
+        if (b == 99)  { return 26; }                 // Cc
+        if (b == 102) { return 27; }                 // Cf
+        if (b == 115) { return 28; }                 // Cs
+        if (b == 111) { return 29; }                 // Co
+    }
+    return 0;                                         // Cn
+}
+
+// Read a whole file into a fresh mmap'd buffer (NUL-terminated). The io
+// heap's bins caps at 64 KB, so io.read_file can't slurp multi-MB UCD
+// files — we mmap our own. Writes byte length to *out_len. Null on error.
+fn slurp(path as *u8, out_len as *i32) as *u8 {
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return cast(*u8, 0); }
+    let is i64 as size = io._lseek(fd, 0, io._SEEK_END);
+    io._lseek(fd, 0, io._SEEK_SET);
+    if (size <= 0) { io._close_fd(fd); return cast(*u8, 0); }
+    let is *u8 as buf = mem.core.mmap_anon(size + 1);
+    if (cast(i64, buf) == 0) { io._close_fd(fd); return cast(*u8, 0); }
+    io.read_exact(fd, buf, size);
+    io._close_fd(fd);
+    out_len[0] = cast(i32, size);
+    return buf;
+}
+
+// ---- trie build ----
+
+fn block_hash(arr as *u16, base as i32) as i64 {
+    let is i64 as h with mut = 1469598103934665603;  // FNV-1a offset basis
+    let is i32 as j with mut = 0;
+    while (j < 32) {
+        h = h ^ cast(i64, arr[base + j]);
+        h = h * 1099511628211;                       // FNV-1a prime
+        j = j + 1;
+    }
+    return h;
+}
+
+fn block_eq(flat as *u16, fbase as i32, data as *u16, dbase as i32) as i32 {
+    let is i32 as j with mut = 0;
+    while (j < 32) {
+        if (flat[fbase + j] != data[dbase + j]) { return 0; }
+        j = j + 1;
+    }
+    return 1;
+}
+
+// ---- .cst emission ----
+
+fn ws(w as *io.Writer, s as *u8) as void { io.write(w, string.String(s)); }
+fn wi(w as *io.Writer, n as i32) as void { io.write_i64(w, cast(i64, n)); }
+fn wn(w as *io.Writer, name as *u8, suf as *u8) as void {
+    io.write(w, string.String(name));
+    io.write(w, string.String(suf));
+}
+
+fn hex_digit(v as i32) as u8 {
+    if (v < 10) { return cast(u8, 48 + v); }
+    return cast(u8, 87 + v);                          // 'a'..'f'
+}
+
+fn emit_byte_hex(w as *io.Writer, b as u8) as void {
+    io.put(w, 92);                                    // '\'
+    io.put(w, 120);                                   // 'x'
+    io.put(w, hex_digit((cast(i32, b) >> 4) & 15));
+    io.put(w, hex_digit(cast(i32, b) & 15));
+}
+
+// Emit a u16 array as chunked string-init globals: <name><kind>_<k>.
+// Returns the number of chunks emitted.
+fn emit_u16_blob(w as *io.Writer, name as *u8, kind as *u8, data as *u16, count as i32) as i32 {
+    let is i32 as total = count << 1;                 // bytes
+    let is i32 as nchunks = (total + 4095) / 4096;
+    let is i32 as k with mut = 0;
+    while (k < nchunks) {
+        ws(w, "let is *u8 as "); wn(w, name, kind); io.put(w, 95); wi(w, k);
+        ws(w, " with imut = \"");
+        let is i32 as start = k * 4096;
+        let is i32 as end with mut = start + 4096;
+        if (end > total) { end = total; }
+        let is i32 as bp with mut = start;
+        while (bp < end) {
+            let is i32 as v = cast(i32, data[bp >> 1]);
+            let is u8 as byte with mut = cast(u8, v & 255);
+            if ((bp & 1) == 1) { byte = cast(u8, (v >> 8) & 255); }
+            emit_byte_hex(w, byte);
+            bp = bp + 1;
+        }
+        ws(w, "\";\n");
+        k = k + 1;
+    }
+    return nchunks;
+}
+
+// Emit the chunk-pointer arrays, init(), constants and the <name>_get()
+// accessor that drives ucd/trie.cst:lookup2.
+fn emit_tail(w as *io.Writer, name as *u8, nidx as i32, ndat as i32, maxcp as i32, def as i32) as void {
+    ws(w, "\nlet is ["); wi(w, nidx); ws(w, "]*u8 as "); wn(w, name, "_index_chunks with mut;\n");
+    ws(w, "let is [");   wi(w, ndat); ws(w, "]*u8 as "); wn(w, name, "_data_chunks with mut;\n");
+    ws(w, "let is i32 as "); wn(w, name, "_ready with mut = 0;\n\n");
+
+    ws(w, "fn "); wn(w, name, "_init() as void {\n");
+    ws(w, "  if ("); wn(w, name, "_ready == 1) { return; }\n");
+    let is i32 as i with mut = 0;
+    while (i < nidx) {
+        ws(w, "  "); wn(w, name, "_index_chunks["); wi(w, i); ws(w, "] = ");
+        wn(w, name, "_index_"); wi(w, i); ws(w, ";\n");
+        i = i + 1;
+    }
+    i = 0;
+    while (i < ndat) {
+        ws(w, "  "); wn(w, name, "_data_chunks["); wi(w, i); ws(w, "] = ");
+        wn(w, name, "_data_"); wi(w, i); ws(w, ";\n");
+        i = i + 1;
+    }
+    ws(w, "  "); wn(w, name, "_ready = 1;\n}\n\n");
+
+    ws(w, "let is i32 as "); wn(w, name, "_maxcp with imut = "); wi(w, maxcp); ws(w, ";\n");
+    ws(w, "let is i32 as "); wn(w, name, "_default with imut = "); wi(w, def); ws(w, ";\n\n");
+
+    ws(w, "fn "); wn(w, name, "_get(cp as i32) as i32 {\n");
+    ws(w, "  if ("); wn(w, name, "_ready == 0) { "); wn(w, name, "_init(); }\n");
+    ws(w, "  return trie.lookup2(cast(**u8, &"); wn(w, name, "_index_chunks), cast(**u8, &");
+    wn(w, name, "_data_chunks), cp, "); wn(w, name, "_maxcp, "); wn(w, name, "_default);\n}\n");
+}
+
+// Build the trie from a filled flat[NUMCP] array and write <path>.
+// `name` is the table prefix used for every generated symbol.
+fn build_and_emit(path as *u8, name as *u8, flat as *u16, def as i32, maxcp as i32) as i32 {
+    let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
+    let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, index) == 0 || cast(i64, data) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as data_count with mut = 0;
+    let is map.MapI64 as dmap = map.mapi64_new();
+
+    // Seed data block 0 = the all-default block (shared by every gap).
+    let is i32 as j0 with mut = 0;
+    while (j0 < 32) { data[j0] = cast(u16, def); j0 = j0 + 1; }
+    data_count = 32;
+    map.mapi64_set(&dmap, block_hash(data, 0), 0);
+
+    let is i32 as b with mut = 0;
+    while (b < NBLOCKS) {
+        let is i32 as base = b << 5;
+        let is i64 as hsh = block_hash(flat, base);
+        let is i64 as found = map.mapi64_get(&dmap, hsh, 0 - 1);
+        let is i32 as id with mut = cast(i32, 0 - 1);
+        if (found >= 0) {
+            if (block_eq(flat, base, data, cast(i32, found) << 5) == 1) { id = cast(i32, found); }
+        }
+        if (id < 0) {
+            id = data_count >> 5;
+            let is i32 as j with mut = 0;
+            while (j < 32) { data[data_count + j] = flat[base + j]; j = j + 1; }
+            data_count = data_count + 32;
+            map.mapi64_set(&dmap, hsh, cast(i64, id));
+        }
+        index[b] = cast(u16, id);
+        b = b + 1;
+    }
+
+    let is i64 as fd = io._open_write(path);
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst from the UCD (Unicode 16.0). DO NOT EDIT.\n");
+    ws(&w, "// Regenerate: bash tools/fetch.sh && caustic tools/gen.cst -o build/gen && ./build/gen\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    let is i32 as nidx = emit_u16_blob(&w, name, "_index", index, NBLOCKS);
+    let is i32 as ndat = emit_u16_blob(&w, name, "_data", data, data_count);
+    emit_tail(&w, name, nidx, ndat, maxcp, def);
+    io.flush(&w);
+    io._close_fd(fd);
+
+    io.write_str(1, "  blocks="); io.write_int(1, cast(i64, data_count >> 5));
+    io.write_str(1, " idx_chunks="); io.write_int(1, cast(i64, nidx));
+    io.write_str(1, " data_chunks="); io.write_int(1, cast(i64, ndat));
+    io.write_str(1, "\n");
+    return 0;
+}
+
+// ---- General_Category (UnicodeData.txt field 2, + First/Last ranges) ----
+
+fn gen_gc() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/UnicodeData.txt", &len);
+    if (cast(i64, p) == 0) {
+        io.write_str(1, "gen_gc: cannot read tools/ucd/UnicodeData.txt\n");
+        return cast(i32, 0 - 1);
+    }
+
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }   // zero-filled => GC_Cn default
+
+    let is i32 as pending with mut = cast(i32, 0 - 1);
+    let is i32 as pending_gc with mut = 0;
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as f1e with mut = 0;
+            let is i32 as f1s = field(lp, llen, 1, &f1e);
+            let is i32 as f2e with mut = 0;
+            let is i32 as f2s = field(lp, llen, 2, &f2e);
+            if (f0s >= 0 && f1s >= 0 && f2s >= 0) {
+                let is i32 as cp = parse_hex(lp, f0s, f0e);
+                let is i32 as g  = gc_id(lp, f2s, f2e);
+                if (ends_with(lp, f1s, f1e, "First>", 6) == 1) {
+                    pending = cp; pending_gc = g;
+                } else if (ends_with(lp, f1s, f1e, "Last>", 5) == 1) {
+                    if (pending >= 0) {
+                        let is i32 as c with mut = pending;
+                        while (c <= cp) { flat[c] = cast(u16, pending_gc); c = c + 1; }
+                        pending = cast(i32, 0 - 1);
+                    }
+                } else {
+                    if (cp >= 0 && cp < NUMCP) { flat[cp] = cast(u16, g); }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    io.write_str(1, "gc:");
+    return build_and_emit("ucd/tables/gc.cst", "gc", flat, 0, U_MAXCP);
+}
+
+fn main() as i32 {
+    if (gen_gc() < 0) { return 1; }
+    io.write_str(1, "gen: ok\n");
+    return 0;
+}

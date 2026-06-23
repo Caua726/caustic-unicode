@@ -1,0 +1,25 @@
+name "caustic-unicode"
+version "0.0.1"
+author "Caua"
+
+target "test_buf" {
+    src "tests/test_buf.cst"
+    out "build/test_buf"
+}
+
+target "test_ucd" {
+    src "tests/test_ucd.cst"
+    out "build/test_ucd"
+}
+
+script "test" {
+    "bash tests/run.sh"
+}
+
+script "gen" {
+    "caustic tools/gen.cst -o build/gen && ./build/gen"
+}
+
+script "clean" {
+    "rm -rf .caustic build"
+}

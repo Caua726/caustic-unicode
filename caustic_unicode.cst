@@ -1,0 +1,21 @@
+// =======================================================
+// caustic-unicode — pure-Caustic ICU-level Unicode library (facade)
+//
+// Re-exports the public modules so a consumer can:
+//   use "caustic-unicode/caustic_unicode.cst" as u;
+//   u.buf.cpbuf_new(16);  u.version();
+//
+// Compile-check the whole library with:  caustic -c caustic_unicode.cst
+// Modules land phase by phase (see docs/roadmap.md); this list grows.
+// Implements Unicode 16.0.
+// =======================================================
+
+use "core/errno.cst" as errno;
+use "core/types.cst" as types;
+use "core/buf.cst"   as buf;
+use "ucd/ucd.cst"    as ucd;
+
+// Library version == the Unicode version it implements.
+fn version() as *u8 {
+    return "16.0";
+}

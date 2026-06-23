@@ -1,0 +1,32 @@
+// =======================================================
+// caustic-unicode/ucd/trie.cst
+// Runtime reader for the two-level code-point tries emitted by
+// tools/gen.cst. Tables are stored as chunked *u8 string blobs
+// (bytes via \xNN, little-endian) — there is no array literal in
+// Caustic, so a generated init() fills [K]*u8 chunk-pointer arrays
+// at first use and the lookups read through them.
+//
+// Layout (SHIFT = 5, BLOCK = 32 code points):
+//   index[cp >> 5]                -> block id   (u16)
+//   data[(block_id << 5)|(cp&31)] -> property   (u16)
+// CHUNK = 4096 decoded bytes/blob, keeping \xNN source literals well
+// under the assembler's ~32 KB per-directive limit.
+// =======================================================
+
+let is i32 as CHUNK_BYTES with imut = 4096;
+
+// Read little-endian u16 element `i` from a chunked byte blob.
+// u16 elements never straddle a 4096-byte (even) chunk boundary.
+fn blob_u16(chunks as **u8, i as i32) as i32 {
+    let is i32 as bo = i << 1;               // byte offset (2 bytes/elem)
+    let is *u8 as base = chunks[bo >> 12];   // / 4096
+    let is i32 as ic = bo & 4095;            // % 4096
+    return cast(i32, base[ic]) | (cast(i32, base[ic + 1]) << 8);
+}
+
+// Two-level trie lookup. Returns `def` for out-of-range code points.
+fn lookup2(index_chunks as **u8, data_chunks as **u8, cp as i32, maxcp as i32, def as i32) as i32 {
+    if (cp < 0 || cp > maxcp) { return def; }
+    let is i32 as blk = blob_u16(index_chunks, cp >> 5);
+    return blob_u16(data_chunks, (blk << 5) | (cp & 31));
+}

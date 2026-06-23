@@ -1,0 +1,58 @@
+// =======================================================
+// caustic-unicode/ucd/props.cst
+// Public code-point property accessors over the generated tries.
+// Total functions: out-of-range / unassigned code points return the
+// property's default (e.g. GC_CN). No allocation, no errors.
+// =======================================================
+
+use "tables/gc.cst" as gc;
+
+// General_Category values — MUST match tools/gen.cst:gc_id().
+let is i64 as GC_CN with imut = 0;    // Unassigned (default)
+let is i64 as GC_LU with imut = 1;    // Letter, uppercase
+let is i64 as GC_LL with imut = 2;    // Letter, lowercase
+let is i64 as GC_LT with imut = 3;    // Letter, titlecase
+let is i64 as GC_LM with imut = 4;    // Letter, modifier
+let is i64 as GC_LO with imut = 5;    // Letter, other
+let is i64 as GC_MN with imut = 6;    // Mark, nonspacing
+let is i64 as GC_MC with imut = 7;    // Mark, spacing combining
+let is i64 as GC_ME with imut = 8;    // Mark, enclosing
+let is i64 as GC_ND with imut = 9;    // Number, decimal digit
+let is i64 as GC_NL with imut = 10;   // Number, letter
+let is i64 as GC_NO with imut = 11;   // Number, other
+let is i64 as GC_PC with imut = 12;   // Punctuation, connector
+let is i64 as GC_PD with imut = 13;   // Punctuation, dash
+let is i64 as GC_PS with imut = 14;   // Punctuation, open
+let is i64 as GC_PE with imut = 15;   // Punctuation, close
+let is i64 as GC_PI with imut = 16;   // Punctuation, initial quote
+let is i64 as GC_PF with imut = 17;   // Punctuation, final quote
+let is i64 as GC_PO with imut = 18;   // Punctuation, other
+let is i64 as GC_SM with imut = 19;   // Symbol, math
+let is i64 as GC_SC with imut = 20;   // Symbol, currency
+let is i64 as GC_SK with imut = 21;   // Symbol, modifier
+let is i64 as GC_SO with imut = 22;   // Symbol, other
+let is i64 as GC_ZS with imut = 23;   // Separator, space
+let is i64 as GC_ZL with imut = 24;   // Separator, line
+let is i64 as GC_ZP with imut = 25;   // Separator, paragraph
+let is i64 as GC_CC with imut = 26;   // Control
+let is i64 as GC_CF with imut = 27;   // Format
+let is i64 as GC_CS with imut = 28;   // Surrogate
+let is i64 as GC_CO with imut = 29;   // Private use
+
+// General_Category of a code point.
+fn general_category(cp as i32) as i64 {
+    return cast(i64, gc.gc_get(cp));
+}
+
+// 1 if cp is a letter (L*), else 0.
+fn is_letter(cp as i32) as i64 {
+    let is i64 as g = general_category(cp);
+    if (g >= GC_LU && g <= GC_LO) { return 1; }
+    return 0;
+}
+
+// 1 if cp is a decimal digit (Nd), else 0.
+fn is_digit(cp as i32) as i64 {
+    if (general_category(cp) == GC_ND) { return 1; }
+    return 0;
+}

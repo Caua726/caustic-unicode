@@ -1,0 +1,5 @@
+build/
+.caustic/
+tools/ucd/
+*.cst.s
+*.cst.s.o

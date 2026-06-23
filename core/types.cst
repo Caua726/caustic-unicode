@@ -1,0 +1,41 @@
+// =======================================================
+// caustic-unicode/core/types.cst
+// Shared code-point constants and the borrowed Span view.
+// Code points are i32 throughout the library (range 0..0x10FFFF;
+// -1 is a valid "no code point" sentinel). No type alias is used —
+// plain i32 matches the caustic-net habit of raw primitives.
+// =======================================================
+
+let is i32 as U_REPLACEMENT with imut = 65533;    // U+FFFD replacement char
+let is i32 as U_MAX_CP      with imut = 1114111;  // U+10FFFF
+let is i32 as U_SUR_LO      with imut = 55296;     // U+D800
+let is i32 as U_SUR_HI      with imut = 57343;     // U+DFFF
+let is i32 as U_BOM         with imut = 65279;     // U+FEFF
+
+// A borrowed (non-owning) view of cnt code points at ptr. Zero-copy.
+struct Span {
+    ptr as *i32;
+    len as i64;
+}
+
+// 1 if cp is a UTF-16 surrogate code point (D800..DFFF), else 0.
+fn is_surrogate(cp as i32) as i64 {
+    if (cp >= U_SUR_LO && cp <= U_SUR_HI) { return 1; }
+    return 0;
+}
+
+// 1 if cp is a valid scalar value (0..0x10FFFF, excluding surrogates).
+fn is_scalar(cp as i32) as i64 {
+    if (cp < 0) { return 0; }
+    if (cp > U_MAX_CP) { return 0; }
+    if (is_surrogate(cp) == 1) { return 0; }
+    return 1;
+}
+
+// 1 if cp is a noncharacter (U+FDD0..U+FDEF or any U+xxFFFE/U+xxFFFF).
+fn is_noncharacter(cp as i32) as i64 {
+    if (cp >= 64976 && cp <= 65007) { return 1; }   // FDD0..FDEF
+    let is i32 as low = cp & 65535;
+    if (low == 65534 || low == 65535) { return 1; } // xxFFFE / xxFFFF
+    return 0;
+}
