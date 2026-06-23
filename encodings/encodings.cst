@@ -189,3 +189,120 @@ fn gb18030_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
     }
     return out.len - base;
 }
+
+// ---- reverse lookups (cp -> pointer) for encoding ----
+fn _rev_jis(cp as i32) as i32 {
+    let is i32 as lo with mut = 0; let is i32 as hi with mut = mb.mb_rj_n - 1;
+    while (lo <= hi) { let is i32 as m = (lo + hi) / 2; let is i32 as v = mb.mb_rjc_at(m);
+        if (v < cp) { lo = m + 1; } else if (v > cp) { hi = m - 1; } else { return mb.mb_rjp_at(m); } }
+    return cast(i32, 0 - 1);
+}
+fn _rev_big5(cp as i32) as i32 {
+    let is i32 as lo with mut = 0; let is i32 as hi with mut = mb.mb_rb_n - 1;
+    while (lo <= hi) { let is i32 as m = (lo + hi) / 2; let is i32 as v = mb.mb_rbc_at(m);
+        if (v < cp) { lo = m + 1; } else if (v > cp) { hi = m - 1; } else { return mb.mb_rbp_at(m); } }
+    return cast(i32, 0 - 1);
+}
+fn _rev_euckr(cp as i32) as i32 {
+    let is i32 as lo with mut = 0; let is i32 as hi with mut = mb.mb_rk_n - 1;
+    while (lo <= hi) { let is i32 as m = (lo + hi) / 2; let is i32 as v = mb.mb_rkc_at(m);
+        if (v < cp) { lo = m + 1; } else if (v > cp) { hi = m - 1; } else { return mb.mb_rkp_at(m); } }
+    return cast(i32, 0 - 1);
+}
+fn _rev_gb(cp as i32) as i32 {
+    let is i32 as lo with mut = 0; let is i32 as hi with mut = mb.mb_rg_n - 1;
+    while (lo <= hi) { let is i32 as m = (lo + hi) / 2; let is i32 as v = mb.mb_rgc_at(m);
+        if (v < cp) { lo = m + 1; } else if (v > cp) { hi = m - 1; } else { return mb.mb_rgp_at(m); } }
+    return cast(i32, 0 - 1);
+}
+
+// ---- multi-byte encoders. Unmappable cp -> 0 - UERR_UNMAPPED. ----
+fn big5_encode(cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as base = out.len; let is i64 as i with mut = 0;
+    while (i < n) { let is i32 as cp = cps[i];
+        if (cp < 128) { buf.bytebuf_push(out, cast(u8, cp)); }
+        else { let is i32 as p = _rev_big5(cp); if (p < 0) { return 0 - errno.UERR_UNMAPPED; }
+            let is i32 as tr with mut = p % 157; if (tr < 63) { tr = tr + 64; } else { tr = tr + 98; }
+            buf.bytebuf_push(out, cast(u8, p / 157 + 129)); buf.bytebuf_push(out, cast(u8, tr)); }
+        i = i + 1; }
+    return out.len - base;
+}
+fn euckr_encode(cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as base = out.len; let is i64 as i with mut = 0;
+    while (i < n) { let is i32 as cp = cps[i];
+        if (cp < 128) { buf.bytebuf_push(out, cast(u8, cp)); }
+        else { let is i32 as p = _rev_euckr(cp); if (p < 0) { return 0 - errno.UERR_UNMAPPED; }
+            buf.bytebuf_push(out, cast(u8, p / 190 + 129)); buf.bytebuf_push(out, cast(u8, p % 190 + 65)); }
+        i = i + 1; }
+    return out.len - base;
+}
+fn sjis_encode(cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as base = out.len; let is i64 as i with mut = 0;
+    while (i < n) { let is i32 as cp = cps[i];
+        if (cp <= 128) { buf.bytebuf_push(out, cast(u8, cp)); }
+        else if (cp == 165) { buf.bytebuf_push(out, cast(u8, 92)); }            // YEN -> 0x5C
+        else if (cp == 8254) { buf.bytebuf_push(out, cast(u8, 126)); }          // OVERLINE -> 0x7E
+        else if (cp >= 65377 && cp <= 65439) { buf.bytebuf_push(out, cast(u8, cp - 65377 + 161)); }  // katakana
+        else { let is i32 as p = _rev_jis(cp); if (p < 0) { return 0 - errno.UERR_UNMAPPED; }
+            let is i32 as l with mut = p / 188; if (l < 31) { l = l + 129; } else { l = l + 193; }
+            let is i32 as tr with mut = p % 188; if (tr < 63) { tr = tr + 64; } else { tr = tr + 65; }
+            buf.bytebuf_push(out, cast(u8, l)); buf.bytebuf_push(out, cast(u8, tr)); }
+        i = i + 1; }
+    return out.len - base;
+}
+fn _gb_range_encode(cp as i32) as i32 {
+    let is i32 as lo with mut = 0; let is i32 as hi with mut = mb.mb_rng_n - 1; let is i32 as best with mut = 0;
+    while (lo <= hi) { let is i32 as m = (lo + hi) / 2; if (mb.mb_rc_at(m) <= cp) { best = m; lo = m + 1; } else { hi = m - 1; } }
+    return mb.mb_rp_at(best) + (cp - mb.mb_rc_at(best));
+}
+fn gb18030_encode(cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as base = out.len; let is i64 as i with mut = 0;
+    while (i < n) { let is i32 as cp = cps[i];
+        if (cp < 128) { buf.bytebuf_push(out, cast(u8, cp)); }
+        else if (cp == 58853) { return 0 - errno.UERR_UNMAPPED; }               // U+E5E5
+        else { let is i32 as p = _rev_gb(cp);
+            if (p >= 0) {
+                let is i32 as tr with mut = p % 190; if (tr < 63) { tr = tr + 64; } else { tr = tr + 65; }
+                buf.bytebuf_push(out, cast(u8, p / 190 + 129)); buf.bytebuf_push(out, cast(u8, tr));
+            } else {
+                let is i32 as p4 with mut = _gb_range_encode(cp);
+                let is i32 as b1 = p4 / 12600; p4 = p4 % 12600;
+                let is i32 as b2 = p4 / 1260; p4 = p4 % 1260;
+                let is i32 as b3 = p4 / 10; let is i32 as b4 = p4 % 10;
+                buf.bytebuf_push(out, cast(u8, b1 + 129)); buf.bytebuf_push(out, cast(u8, b2 + 48));
+                buf.bytebuf_push(out, cast(u8, b3 + 129)); buf.bytebuf_push(out, cast(u8, b4 + 48));
+            } }
+        i = i + 1; }
+    return out.len - base;
+}
+
+// ---- EUC-JP (jis0208 + 0x8E katakana + 0x8F jis0212) ----
+fn eucjp_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len; let is i32 as lead with mut = 0; let is i32 as f212 with mut = 0; let is i64 as i with mut = 0;
+    while (i < n) { let is i32 as b = cast(i32, src[i]);
+        if (lead == 142) { lead = 0; if (b >= 161 && b <= 223) { buf.cpbuf_push(out, 65377 + b - 161); } else { buf.cpbuf_push(out, U_REPL); if (b < 128) { i = i - 1; } } }
+        else if (lead == 143) { if (b >= 161 && b <= 254) { lead = b; f212 = 1; } else { lead = 0; buf.cpbuf_push(out, U_REPL); if (b < 128) { i = i - 1; } } }
+        else if (lead != 0) { let is i32 as l = lead; lead = 0;
+            if (b >= 161 && b <= 254) { let is i32 as ptr = (l - 161) * 94 + (b - 161);
+                if (f212 == 1) { f212 = 0; if (ptr >= 0 && ptr < mb.mb_jis212_n) { _emit(out, mb.mb_jis212_at(ptr)); } else { buf.cpbuf_push(out, U_REPL); } }
+                else { if (ptr >= 0 && ptr < mb.mb_jis_n) { _emit(out, mb.mb_jis_at(ptr)); } else { buf.cpbuf_push(out, U_REPL); } } }
+            else { f212 = 0; buf.cpbuf_push(out, U_REPL); if (b < 128) { i = i - 1; } } }
+        else if (b < 128) { buf.cpbuf_push(out, b); }
+        else if (b == 142 || b == 143) { lead = b; }
+        else if (b >= 161 && b <= 254) { lead = b; }
+        else { buf.cpbuf_push(out, U_REPL); }
+        i = i + 1; }
+    return out.len - base;
+}
+fn eucjp_encode(cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as base = out.len; let is i64 as i with mut = 0;
+    while (i < n) { let is i32 as cp = cps[i];
+        if (cp < 128) { buf.bytebuf_push(out, cast(u8, cp)); }
+        else if (cp == 165) { buf.bytebuf_push(out, cast(u8, 92)); }
+        else if (cp == 8254) { buf.bytebuf_push(out, cast(u8, 126)); }
+        else if (cp >= 65377 && cp <= 65439) { buf.bytebuf_push(out, cast(u8, 142)); buf.bytebuf_push(out, cast(u8, cp - 65377 + 161)); }
+        else { let is i32 as p = _rev_jis(cp); if (p < 0) { return 0 - errno.UERR_UNMAPPED; }
+            buf.bytebuf_push(out, cast(u8, p / 94 + 161)); buf.bytebuf_push(out, cast(u8, p % 94 + 161)); }
+        i = i + 1; }
+    return out.len - base;
+}

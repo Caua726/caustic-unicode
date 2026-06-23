@@ -1859,6 +1859,30 @@ fn _mb_load_pairs(path as *u8, rp as *u32, rc as *u32, cap as i32) as i32 {
     return n;
 }
 
+// Build a reverse map cp -> pointer (sorted by cp) from a forward index.
+// prefer_last=1 keeps the last pointer for a cp (Big5), else the first.
+fn _mb_reverse(fwd as *u32, size as i32, prefer_last as i32, rcp as *u32, rptr as *u32, cap as i32) as i32 {
+    let is *u32 as rev = cast(*u32, mem.core.mmap_anon(cast(i64, 1114112) * 4));
+    let is i32 as i with mut = 0;
+    while (i < 1114112) { rev[i] = cast(u32, 2147483647); i = i + 1; }
+    let is i32 as p with mut = 0;
+    while (p < size) {
+        let is i32 as cp = cast(i32, fwd[p]);
+        if (cp != 1114112 && cp >= 0 && cp < 1114112) {
+            if (prefer_last == 1) { rev[cp] = cast(u32, p); }
+            else { if (rev[cp] == cast(u32, 2147483647)) { rev[cp] = cast(u32, p); } }
+        }
+        p = p + 1;
+    }
+    let is i32 as cnt with mut = 0;
+    let is i32 as cp2 with mut = 0;
+    while (cp2 < 1114112) {
+        if (rev[cp2] != cast(u32, 2147483647) && cnt < cap) { rcp[cnt] = cast(u32, cp2); rptr[cnt] = rev[cp2]; cnt = cnt + 1; }
+        cp2 = cp2 + 1;
+    }
+    return cnt;
+}
+
 fn gen_mbcs() as i32 {
     let is *u32 as jis = cast(*u32, mem.core.mmap_anon(cast(i64, 12000) * 4));
     let is *u32 as big = cast(*u32, mem.core.mmap_anon(cast(i64, 20000) * 4));
@@ -1869,10 +1893,25 @@ fn gen_mbcs() as i32 {
     let is i32 as nb = _mb_load("tools/ucd/whatwg/index-big5.txt", big, 20000);
     let is i32 as nk = _mb_load("tools/ucd/whatwg/index-euc-kr.txt", euk, 24000);
     let is i32 as ng = _mb_load("tools/ucd/whatwg/index-gb18030.txt", gbk, 24000);
+    let is *u32 as j212 = cast(*u32, mem.core.mmap_anon(cast(i64, 12000) * 4));
+    let is i32 as n212 = _mb_load("tools/ucd/whatwg/index-jis0212.txt", j212, 12000);
     // gb18030 ranges (pointer -> starting cp), already ascending by pointer
     let is *u32 as rp = cast(*u32, mem.core.mmap_anon(cast(i64, 512) * 4));
     let is *u32 as rc = cast(*u32, mem.core.mmap_anon(cast(i64, 512) * 4));
     let is i32 as nr = _mb_load_pairs("tools/ucd/whatwg/index-gb18030-ranges.txt", rp, rc, 512);
+    // reverse maps for encoding
+    let is *u32 as rjc = cast(*u32, mem.core.mmap_anon(cast(i64, 16000) * 4));
+    let is *u32 as rjp = cast(*u32, mem.core.mmap_anon(cast(i64, 16000) * 4));
+    let is i32 as nrj = _mb_reverse(jis, nj, 0, rjc, rjp, 16000);
+    let is *u32 as rbc = cast(*u32, mem.core.mmap_anon(cast(i64, 20000) * 4));
+    let is *u32 as rbp = cast(*u32, mem.core.mmap_anon(cast(i64, 20000) * 4));
+    let is i32 as nrb = _mb_reverse(big, nb, 1, rbc, rbp, 20000);
+    let is *u32 as rkc = cast(*u32, mem.core.mmap_anon(cast(i64, 20000) * 4));
+    let is *u32 as rkp = cast(*u32, mem.core.mmap_anon(cast(i64, 20000) * 4));
+    let is i32 as nrk = _mb_reverse(euk, nk, 0, rkc, rkp, 20000);
+    let is *u32 as rgc = cast(*u32, mem.core.mmap_anon(cast(i64, 24000) * 4));
+    let is *u32 as rgp = cast(*u32, mem.core.mmap_anon(cast(i64, 24000) * 4));
+    let is i32 as nrg = _mb_reverse(gbk, ng, 0, rgc, rgp, 24000);
 
     let is i64 as fd = io._open_write("ucd/tables/mbcs.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
@@ -1887,6 +1926,20 @@ fn gen_mbcs() as i32 {
     emit_flat_u32(&w, "mb_gb", gbk, ng);
     emit_flat_u32(&w, "mb_rp", rp, nr);
     emit_flat_u32(&w, "mb_rc", rc, nr);
+    emit_flat_u32(&w, "mb_jis212", j212, n212);
+    emit_flat_u32(&w, "mb_rjc", rjc, nrj);
+    emit_flat_u32(&w, "mb_rjp", rjp, nrj);
+    emit_flat_u32(&w, "mb_rbc", rbc, nrb);
+    emit_flat_u32(&w, "mb_rbp", rbp, nrb);
+    emit_flat_u32(&w, "mb_rkc", rkc, nrk);
+    emit_flat_u32(&w, "mb_rkp", rkp, nrk);
+    emit_flat_u32(&w, "mb_rgc", rgc, nrg);
+    emit_flat_u32(&w, "mb_rgp", rgp, nrg);
+    ws(&w, "let is i32 as mb_jis212_n with imut = "); wi(&w, n212); ws(&w, ";\n");
+    ws(&w, "let is i32 as mb_rj_n with imut = "); wi(&w, nrj); ws(&w, ";\n");
+    ws(&w, "let is i32 as mb_rb_n with imut = "); wi(&w, nrb); ws(&w, ";\n");
+    ws(&w, "let is i32 as mb_rk_n with imut = "); wi(&w, nrk); ws(&w, ";\n");
+    ws(&w, "let is i32 as mb_rg_n with imut = "); wi(&w, nrg); ws(&w, ";\n");
     ws(&w, "let is i32 as mb_jis_n with imut = "); wi(&w, nj); ws(&w, ";\n");
     ws(&w, "let is i32 as mb_big5_n with imut = "); wi(&w, nb); ws(&w, ";\n");
     ws(&w, "let is i32 as mb_euckr_n with imut = "); wi(&w, nk); ws(&w, ";\n");

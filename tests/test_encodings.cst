@@ -84,6 +84,41 @@ fn main() as i32 {
     buf.cpbuf_reset(&o); enc.gb18030_decode(cast(*u8, &gb4), 4, &o);
     if (o.len != 1 || o.ptr[0] != 128) { return 15; }
 
+    // multi-byte encode + round-trip
+    let is [1]i32 as t;
+    t[0] = 19968;  // 一  Big5 round-trip
+    buf.bytebuf_reset(&b); enc.big5_encode(cast(*i32, &t), 1, &b);
+    buf.cpbuf_reset(&o); enc.big5_decode(b.ptr, b.len, &o);
+    if (o.len != 1 || o.ptr[0] != 19968) { return 16; }
+
+    t[0] = 44032;  // 가  EUC-KR round-trip
+    buf.bytebuf_reset(&b); enc.euckr_encode(cast(*i32, &t), 1, &b);
+    buf.cpbuf_reset(&o); enc.euckr_decode(b.ptr, b.len, &o);
+    if (o.len != 1 || o.ptr[0] != 44032) { return 17; }
+
+    t[0] = 12354;  // あ  Shift_JIS round-trip
+    buf.bytebuf_reset(&b); enc.sjis_encode(cast(*i32, &t), 1, &b);
+    buf.cpbuf_reset(&o); enc.sjis_decode(b.ptr, b.len, &o);
+    if (o.len != 1 || o.ptr[0] != 12354) { return 18; }
+    t[0] = 65393;  // halfwidth katakana ｱ
+    buf.bytebuf_reset(&b); enc.sjis_encode(cast(*i32, &t), 1, &b);
+    if (b.len != 1 || b.ptr[0] != 177) { return 19; }
+
+    t[0] = 19968;  // 一  gb18030 2-byte round-trip
+    buf.bytebuf_reset(&b); enc.gb18030_encode(cast(*i32, &t), 1, &b);
+    buf.cpbuf_reset(&o); enc.gb18030_decode(b.ptr, b.len, &o);
+    if (o.len != 1 || o.ptr[0] != 19968) { return 20; }
+    t[0] = 128512;  // 😀  gb18030 4-byte round-trip
+    buf.bytebuf_reset(&b); enc.gb18030_encode(cast(*i32, &t), 1, &b);
+    if (b.len != 4) { return 21; }
+    buf.cpbuf_reset(&o); enc.gb18030_decode(b.ptr, b.len, &o);
+    if (o.len != 1 || o.ptr[0] != 128512) { return 22; }
+
+    t[0] = 12354;  // あ  EUC-JP round-trip
+    buf.bytebuf_reset(&b); enc.eucjp_encode(cast(*i32, &t), 1, &b);
+    buf.cpbuf_reset(&o); enc.eucjp_decode(b.ptr, b.len, &o);
+    if (o.len != 1 || o.ptr[0] != 12354) { return 23; }
+
     buf.cpbuf_free(&o); buf.bytebuf_free(&b);
     return 0;
 }
