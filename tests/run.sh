@@ -47,6 +47,7 @@ run_case conf_linebreak tests/conformance/conf_linebreak.cst
 run_case conf_bidi      tests/conformance/conf_bidi.cst
 run_case test_idna      tests/test_idna.cst
 run_case conf_collate   tests/conformance/conf_collate.cst
+run_case test_encodings tests/test_encodings.cst
 
 if [ "$fail" -eq 0 ]; then echo "all green"; else echo "FAILURES"; fi
 exit $fail

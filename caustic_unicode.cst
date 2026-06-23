@@ -23,6 +23,7 @@ use "linebreak/linebreak.cst" as linebreak;
 use "bidi/bidi.cst"  as bidi;
 use "idna/idna.cst"  as idna;
 use "collate/collate.cst" as collate;
+use "encodings/encodings.cst" as encodings;
 
 // Library version == the Unicode version it implements.
 fn version() as *u8 {

@@ -1,0 +1,52 @@
+// =======================================================
+// caustic-unicode/encodings/encodings.cst
+// WHATWG legacy encodings. Single-byte codecs (windows-125x, ISO-8859-*,
+// KOI8, IBM866, macintosh, windows-874, x-mac-cyrillic) are driven by the
+// generated sbcs table. Multi-byte codecs are added below.
+// Decoding maps unmapped bytes to U+FFFD; encoding errors on unmappable cps.
+// =======================================================
+
+use "../core/errno.cst"       as errno;
+use "../core/buf.cst"         as buf;
+use "../ucd/tables/sbcs.cst"  as sb;
+
+let is i32 as U_REPL with imut = 65533;   // U+FFFD REPLACEMENT CHARACTER
+
+// Decode single-byte bytes (encoding `enc`) into code points. Returns count.
+fn sb_decode(enc as i32, src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as b = cast(i32, src[i]);
+        if (b < 128) { buf.cpbuf_push(out, b); }
+        else {
+            let is i32 as v = sb.sb_at(enc * 128 + (b - 128));
+            if (v == 1114112) { buf.cpbuf_push(out, U_REPL); } else { buf.cpbuf_push(out, v); }
+        }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// Encode code points to single-byte (encoding `enc`). Returns byte count, or
+// 0 - UERR_UNMAPPED if a code point has no byte in this encoding.
+fn sb_encode(enc as i32, cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as cp = cps[i];
+        if (cp < 128) { buf.bytebuf_push(out, cast(u8, cp)); }
+        else {
+            let is i32 as b with mut = cast(i32, 0 - 1);
+            let is i32 as k with mut = 0;
+            while (k < 128) {
+                if (sb.sb_at(enc * 128 + k) == cp) { b = 128 + k; k = 128; }
+                else { k = k + 1; }
+            }
+            if (b < 0) { return 0 - errno.UERR_UNMAPPED; }
+            buf.bytebuf_push(out, cast(u8, b));
+        }
+        i = i + 1;
+    }
+    return out.len - base;
+}

@@ -1,0 +1,60 @@
+// =======================================================
+// tests/test_encodings.cst — WHATWG single-byte codecs (curated vectors +
+// round-trips). Exit 0 = pass; non-zero = the numbered check that failed.
+// =======================================================
+
+use "../encodings/encodings.cst" as enc;
+use "../ucd/tables/sbcs.cst"      as sb;
+use "../core/buf.cst"            as buf;
+
+fn main() as i32 {
+    let is buf.CpBuf as o = buf.cpbuf_new(16);
+
+    // windows-1252: 0x80 -> EURO (U+20AC), 0xA9 -> COPYRIGHT (U+00A9)
+    let is [2]u8 as w; w[0] = 128; w[1] = 169;
+    buf.cpbuf_reset(&o); enc.sb_decode(sb.ENC_WINDOWS_1252, cast(*u8, &w), 2, &o);
+    if (o.len != 2 || o.ptr[0] != 8364 || o.ptr[1] != 169) { return 1; }
+
+    // ISO-8859-15: 0xA4 -> EURO
+    let is [1]u8 as a; a[0] = 164;
+    buf.cpbuf_reset(&o); enc.sb_decode(sb.ENC_ISO_8859_15, cast(*u8, &a), 1, &o);
+    if (o.len != 1 || o.ptr[0] != 8364) { return 2; }
+
+    // windows-1251: 0xC0 -> CYRILLIC CAPITAL A (U+0410)
+    let is [1]u8 as c; c[0] = 192;
+    buf.cpbuf_reset(&o); enc.sb_decode(sb.ENC_WINDOWS_1251, cast(*u8, &c), 1, &o);
+    if (o.len != 1 || o.ptr[0] != 1040) { return 3; }
+
+    // ASCII passthrough
+    let is [3]u8 as asc; asc[0] = 65; asc[1] = 66; asc[2] = 67;
+    buf.cpbuf_reset(&o); enc.sb_decode(sb.ENC_WINDOWS_1252, cast(*u8, &asc), 3, &o);
+    if (o.len != 3 || o.ptr[0] != 65 || o.ptr[2] != 67) { return 4; }
+
+    // encode: EURO -> 0x80 in windows-1252, 0xA4 in iso-8859-15
+    let is buf.ByteBuf as b = buf.bytebuf_new(16);
+    let is [1]i32 as euro; euro[0] = 8364;
+    buf.bytebuf_reset(&b); enc.sb_encode(sb.ENC_WINDOWS_1252, cast(*i32, &euro), 1, &b);
+    if (b.len != 1 || b.ptr[0] != 128) { return 5; }
+    buf.bytebuf_reset(&b); enc.sb_encode(sb.ENC_ISO_8859_15, cast(*i32, &euro), 1, &b);
+    if (b.len != 1 || b.ptr[0] != 164) { return 6; }
+
+    // unmappable -> error (CJK in windows-1252)
+    let is [1]i32 as han; han[0] = 20013;
+    buf.bytebuf_reset(&b);
+    if (enc.sb_encode(sb.ENC_WINDOWS_1252, cast(*i32, &han), 1, &b) >= 0) { return 7; }
+
+    // round-trip windows-1251 full high range
+    let is i32 as bb with mut = 128;
+    while (bb < 256) {
+        let is [1]u8 as one; one[0] = cast(u8, bb);
+        buf.cpbuf_reset(&o); enc.sb_decode(sb.ENC_WINDOWS_1251, cast(*u8, &one), 1, &o);
+        if (o.ptr[0] != 65533) {                      // skip unmapped
+            buf.bytebuf_reset(&b); enc.sb_encode(sb.ENC_WINDOWS_1251, o.ptr, 1, &b);
+            if (b.len != 1 || cast(i32, b.ptr[0]) != bb) { return 8; }
+        }
+        bb = bb + 1;
+    }
+
+    buf.cpbuf_free(&o); buf.bytebuf_free(&b);
+    return 0;
+}
