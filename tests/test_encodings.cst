@@ -55,6 +55,35 @@ fn main() as i32 {
         bb = bb + 1;
     }
 
+    // Shift_JIS: halfwidth katakana 0xB1 -> U+FF71; あ 0x82 0xA0 -> U+3042
+    let is [1]u8 as sj1; sj1[0] = 177;
+    buf.cpbuf_reset(&o); enc.sjis_decode(cast(*u8, &sj1), 1, &o);
+    if (o.len != 1 || o.ptr[0] != 65393) { return 9; }
+    let is [2]u8 as sj2; sj2[0] = 130; sj2[1] = 160;
+    buf.cpbuf_reset(&o); enc.sjis_decode(cast(*u8, &sj2), 2, &o);
+    if (o.len != 1 || o.ptr[0] != 12354) { return 10; }
+
+    // Big5: 一 (U+4E00) = 0xA4 0x40
+    let is [2]u8 as bg; bg[0] = 164; bg[1] = 64;
+    buf.cpbuf_reset(&o); enc.big5_decode(cast(*u8, &bg), 2, &o);
+    if (o.len != 1 || o.ptr[0] != 19968) { return 11; }
+
+    // EUC-KR: 가 (U+AC00) = 0xB0 0xA1
+    let is [2]u8 as ek; ek[0] = 176; ek[1] = 161;
+    buf.cpbuf_reset(&o); enc.euckr_decode(cast(*u8, &ek), 2, &o);
+    if (o.len != 1 || o.ptr[0] != 44032) { return 12; }
+
+    // gb18030: euro 0x80; 2-byte 一 0xD2 0xBB; 4-byte 0x81 0x30 0x81 0x30 -> U+0080
+    let is [1]u8 as gbe; gbe[0] = 128;
+    buf.cpbuf_reset(&o); enc.gb18030_decode(cast(*u8, &gbe), 1, &o);
+    if (o.len != 1 || o.ptr[0] != 8364) { return 13; }
+    let is [2]u8 as gb2; gb2[0] = 210; gb2[1] = 187;
+    buf.cpbuf_reset(&o); enc.gb18030_decode(cast(*u8, &gb2), 2, &o);
+    if (o.len != 1 || o.ptr[0] != 19968) { return 14; }
+    let is [4]u8 as gb4; gb4[0] = 129; gb4[1] = 48; gb4[2] = 129; gb4[3] = 48;
+    buf.cpbuf_reset(&o); enc.gb18030_decode(cast(*u8, &gb4), 4, &o);
+    if (o.len != 1 || o.ptr[0] != 128) { return 15; }
+
     buf.cpbuf_free(&o); buf.bytebuf_free(&b);
     return 0;
 }

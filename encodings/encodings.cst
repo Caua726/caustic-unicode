@@ -50,3 +50,142 @@ fn sb_encode(enc as i32, cps as *i32, n as i64, out as *buf.ByteBuf) as i64 {
     }
     return out.len - base;
 }
+
+use "../ucd/tables/mbcs.cst" as mb;
+
+// ---- multi-byte decoders (WHATWG). Unmapped/invalid -> U+FFFD. ----
+
+fn _emit(out as *buf.CpBuf, v as i32) as void {
+    if (v == 1114112) { buf.cpbuf_push(out, U_REPL); } else { buf.cpbuf_push(out, v); }
+}
+
+// Big5 (lead 0x81-0xFE). Pointers 1133/1135/1164/1166 expand to two cps.
+fn big5_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i32 as lead with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as b = cast(i32, src[i]);
+        if (lead != 0) {
+            let is i32 as l = lead; lead = 0;
+            let is i32 as off with mut = 98;
+            if (b < 127) { off = 64; }
+            if ((b >= 64 && b <= 126) || (b >= 161 && b <= 254)) {
+                let is i32 as ptr = (l - 129) * 157 + (b - off);
+                if (ptr == 1133) { buf.cpbuf_push(out, 202); buf.cpbuf_push(out, 772); }
+                else if (ptr == 1135) { buf.cpbuf_push(out, 202); buf.cpbuf_push(out, 780); }
+                else if (ptr == 1164) { buf.cpbuf_push(out, 234); buf.cpbuf_push(out, 772); }
+                else if (ptr == 1166) { buf.cpbuf_push(out, 234); buf.cpbuf_push(out, 780); }
+                else if (ptr >= 0 && ptr < mb.mb_big5_n) { _emit(out, mb.mb_big5_at(ptr)); }
+                else { buf.cpbuf_push(out, U_REPL); }
+            } else {
+                buf.cpbuf_push(out, U_REPL);
+                if (b < 128) { i = i - 1; }     // reprocess ASCII byte
+            }
+        } else if (b < 128) { buf.cpbuf_push(out, b); }
+        else if (b >= 129 && b <= 254) { lead = b; }
+        else { buf.cpbuf_push(out, U_REPL); }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// EUC-KR (lead 0x81-0xFE).
+fn euckr_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i32 as lead with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as b = cast(i32, src[i]);
+        if (lead != 0) {
+            let is i32 as l = lead; lead = 0;
+            if (b >= 65 && b <= 254) {
+                let is i32 as ptr = (l - 129) * 190 + (b - 65);
+                if (ptr >= 0 && ptr < mb.mb_euckr_n) { _emit(out, mb.mb_euckr_at(ptr)); } else { buf.cpbuf_push(out, U_REPL); }
+            } else { buf.cpbuf_push(out, U_REPL); if (b < 128) { i = i - 1; } }
+        } else if (b < 128) { buf.cpbuf_push(out, b); }
+        else if (b >= 129 && b <= 254) { lead = b; }
+        else { buf.cpbuf_push(out, U_REPL); }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// Shift_JIS (lead 0x81-0x9F/0xE0-0xFC; 0xA1-0xDF = halfwidth katakana).
+fn sjis_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i32 as lead with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as b = cast(i32, src[i]);
+        if (lead != 0) {
+            let is i32 as l = lead; lead = 0;
+            let is i32 as off with mut = 65;
+            if (b < 127) { off = 64; }
+            let is i32 as la with mut = 193;
+            if (l < 160) { la = 129; }
+            if ((b >= 64 && b <= 126) || (b >= 128 && b <= 252)) {
+                let is i32 as ptr = (l - la) * 188 + (b - off);
+                if (ptr >= 8836 && ptr <= 10715) { buf.cpbuf_push(out, 57344 + ptr - 8836); }
+                else if (ptr >= 0 && ptr < mb.mb_jis_n) { _emit(out, mb.mb_jis_at(ptr)); }
+                else { buf.cpbuf_push(out, U_REPL); }
+            } else { buf.cpbuf_push(out, U_REPL); if (b < 128) { i = i - 1; } }
+        } else if (b <= 128) { buf.cpbuf_push(out, b); }
+        else if (b >= 161 && b <= 223) { buf.cpbuf_push(out, 65377 + b - 161); }
+        else if ((b >= 129 && b <= 159) || (b >= 224 && b <= 252)) { lead = b; }
+        else { buf.cpbuf_push(out, U_REPL); }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// gb18030 4-byte pointer -> cp via the range table.
+fn _gb_range(ptr as i32) as i32 {
+    if (ptr == 7457) { return 59335; }                       // U+E7C7
+    if ((ptr > 39419 && ptr < 189000) || ptr > 1237575) { return 1114112; }
+    let is i32 as lo with mut = 0;
+    let is i32 as hi with mut = mb.mb_rng_n - 1;
+    let is i32 as best with mut = 0;
+    while (lo <= hi) {
+        let is i32 as mid = (lo + hi) / 2;
+        if (mb.mb_rp_at(mid) <= ptr) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    return mb.mb_rc_at(best) + (ptr - mb.mb_rp_at(best));
+}
+
+// gb18030 (1-byte ASCII/0x80=euro; 2-byte; 4-byte via ranges).
+fn gb18030_decode(src as *u8, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i32 as b1 with mut = 0;
+    let is i32 as b2 with mut = 0;
+    let is i32 as b3 with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as b = cast(i32, src[i]);
+        if (b3 != 0) {
+            if (b >= 48 && b <= 57) {
+                let is i32 as ptr = ((b1 - 129) * 12600) + ((b2 - 48) * 1260) + ((b3 - 129) * 10) + (b - 48);
+                _emit(out, _gb_range(ptr));
+            } else { buf.cpbuf_push(out, U_REPL); }
+            b1 = 0; b2 = 0; b3 = 0;
+        } else if (b2 != 0) {
+            if (b >= 129 && b <= 254) { b3 = b; } else { buf.cpbuf_push(out, U_REPL); b1 = 0; b2 = 0; }
+        } else if (b1 != 0) {
+            if (b >= 48 && b <= 57) { b2 = b; }
+            else {
+                let is i32 as l = b1; b1 = 0;
+                let is i32 as off with mut = 65;
+                if (b < 127) { off = 64; }
+                if ((b >= 64 && b <= 126) || (b >= 128 && b <= 254)) {
+                    let is i32 as ptr = (l - 129) * 190 + (b - off);
+                    if (ptr >= 0 && ptr < mb.mb_gb_n) { _emit(out, mb.mb_gb_at(ptr)); } else { buf.cpbuf_push(out, U_REPL); }
+                } else { buf.cpbuf_push(out, U_REPL); if (b < 128) { i = i - 1; } }
+            }
+        } else if (b < 128) { buf.cpbuf_push(out, b); }
+        else if (b == 128) { buf.cpbuf_push(out, 8364); }
+        else if (b >= 129 && b <= 254) { b1 = b; }
+        else { buf.cpbuf_push(out, U_REPL); }
+        i = i + 1;
+    }
+    return out.len - base;
+}
