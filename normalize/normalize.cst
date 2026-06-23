@@ -1,0 +1,238 @@
+// =======================================================
+// caustic-unicode/normalize/normalize.cst
+// Unicode normalization (UAX #15): NFD, NFC, NFKD, NFKC.
+//
+// Pipeline: decompose (canonical for NF*D-of-NFC; compatibility for NFK*)
+// recursively to a fixed point, apply canonical ordering (stable sort by
+// combining class), and — for the composing forms — apply canonical
+// composition. Hangul is handled algorithmically per UAX #15 §3.12.
+//
+// Functions append code points to a caller CpBuf and return the count, or
+// 0 - errno.UERR_* on failure. *_u8 wrappers bridge UTF-8 <-> UTF-8.
+// =======================================================
+
+use "../core/buf.cst"           as buf;
+use "../core/errno.cst"         as errno;
+use "../ucd/props.cst"          as props;
+use "../ucd/tables/decomp.cst"  as dec;
+use "../ucd/tables/compose.cst" as comp;
+use "../utf/utf8.cst"           as utf8;
+
+// Hangul composition constants (UAX #15 §3.12).
+let is i32 as S_BASE  with imut = 44032;   // 0xAC00
+let is i32 as L_BASE  with imut = 4352;    // 0x1100
+let is i32 as V_BASE  with imut = 4449;    // 0x1161
+let is i32 as T_BASE  with imut = 4519;    // 0x11A7
+let is i32 as L_COUNT with imut = 19;
+let is i32 as V_COUNT with imut = 21;
+let is i32 as T_COUNT with imut = 28;
+let is i32 as N_COUNT with imut = 588;     // V_COUNT * T_COUNT
+let is i32 as S_COUNT with imut = 11172;   // L_COUNT * N_COUNT
+
+// Module-local scratch buffer for the decomposed form.
+let is buf.CpBuf as _scratch with mut;
+let is i32 as _scratch_ready with mut = 0;
+
+fn _scratch_get() as *buf.CpBuf {
+    if (_scratch_ready == 0) { _scratch = buf.cpbuf_new(64); _scratch_ready = 1; }
+    buf.cpbuf_reset(&_scratch);
+    return &_scratch;
+}
+
+// Recursively decompose one code point into `out`. compat=1 applies both
+// canonical and compatibility mappings (NFKD); compat=0 only canonical (NFD).
+fn decompose_cp(cp as i32, compat as i32, out as *buf.CpBuf) as i64 {
+    if (cp >= S_BASE && cp < S_BASE + S_COUNT) {              // Hangul syllable
+        let is i32 as si = cp - S_BASE;
+        let is i32 as l = L_BASE + si / N_COUNT;
+        let is i32 as v = V_BASE + (si % N_COUNT) / T_COUNT;
+        if (buf.cpbuf_push(out, l) < 0) { return 0 - errno.UERR_NOSPACE; }
+        if (buf.cpbuf_push(out, v) < 0) { return 0 - errno.UERR_NOSPACE; }
+        if (si % T_COUNT != 0) {
+            if (buf.cpbuf_push(out, T_BASE + si % T_COUNT) < 0) { return 0 - errno.UERR_NOSPACE; }
+        }
+        return 0;
+    }
+    let is i32 as m = dec.decomp_get(cp);
+    if (m != 0) {
+        let is i32 as rec = dec.decomp_meta_at(m);
+        let is i32 as off = rec & 1048575;                   // bits 0..19
+        let is i32 as ln = (rec >> 20) & 255;                // bits 20..27
+        let is i32 as is_compat = (rec >> 28) & 1;           // bit 28
+        if (is_compat == 0 || compat == 1) {
+            let is i32 as k with mut = 0;
+            while (k < ln) {
+                let is i32 as d = dec.decomp_pool_at(off + k);
+                if (decompose_cp(d, compat, out) < 0) { return 0 - errno.UERR_NOSPACE; }
+                k = k + 1;
+            }
+            return 0;
+        }
+    }
+    if (buf.cpbuf_push(out, cp) < 0) { return 0 - errno.UERR_NOSPACE; }
+    return 0;
+}
+
+// Stable canonical ordering: sort each run of combining marks (ccc > 0)
+// between starters by combining class, in place. Insertion sort keeps the
+// relative order of equal-class marks (stability), which UAX #15 requires.
+fn canonical_order(arr as *i32, n as i64) as void {
+    let is i64 as i with mut = 1;
+    while (i < n) {
+        let is i32 as c = arr[i];
+        let is i64 as cc = props.combining_class(c);
+        if (cc != 0) {
+            let is i64 as j with mut = i;
+            while (j > 0) {
+                let is i64 as pcc = props.combining_class(arr[j - 1]);
+                if (pcc == 0 || pcc <= cc) { break; }
+                arr[j] = arr[j - 1];
+                arr[j - 1] = c;
+                j = j - 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Decompose a whole run into the scratch buffer and canonically order it.
+fn _decompose_all(cps as *i32, n as i64, compat as i32, tmp as *buf.CpBuf) as i64 {
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (decompose_cp(cps[i], compat, tmp) < 0) { return 0 - errno.UERR_NOSPACE; }
+        i = i + 1;
+    }
+    canonical_order(tmp.ptr, tmp.len);
+    return tmp.len;
+}
+
+// Canonical composition of a pair (a starter, b following). Returns the
+// composed code point, or -1 if (a,b) is not a primary composite.
+fn compose_pair(a as i32, b as i32) as i32 {
+    if (a >= L_BASE && a < L_BASE + L_COUNT && b >= V_BASE && b < V_BASE + V_COUNT) {
+        return S_BASE + ((a - L_BASE) * V_COUNT + (b - V_BASE)) * T_COUNT;   // L + V -> LV
+    }
+    if (a >= S_BASE && a < S_BASE + S_COUNT && ((a - S_BASE) % T_COUNT) == 0
+        && b > T_BASE && b < T_BASE + T_COUNT) {
+        return a + (b - T_BASE);                                              // LV + T -> LVT
+    }
+    let is i32 as lo with mut = 0;
+    let is i32 as hi with mut = comp.compose_count - 1;
+    while (lo <= hi) {
+        let is i32 as mid = (lo + hi) / 2;
+        let is i32 as ma = comp.compose_a_at(mid);
+        let is i32 as mb = comp.compose_b_at(mid);
+        if (ma < a || (ma == a && mb < b)) { lo = mid + 1; }
+        else if (ma > a || (ma == a && mb > b)) { hi = mid - 1; }
+        else { return comp.compose_c_at(mid); }
+    }
+    return cast(i32, 0 - 1);
+}
+
+// Compose an already-decomposed, canonically-ordered run into `out`.
+// Returns the count appended.
+fn compose_run(arr as *i32, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as starter with mut = 0 - 1;
+    let is i64 as last_cc with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as c = arr[i];
+        let is i64 as cc = props.combining_class(c);
+        if (out.len == base) {
+            if (buf.cpbuf_push(out, c) < 0) { return 0 - errno.UERR_NOSPACE; }
+            if (cc == 0) { starter = out.len - 1; }
+            last_cc = cc;
+        } else {
+            let is i32 as composed with mut = cast(i32, 0 - 1);
+            if (starter >= 0 && (last_cc < cc || last_cc == 0)) {
+                composed = compose_pair(out.ptr[starter], c);
+            }
+            if (composed >= 0) {
+                out.ptr[starter] = composed;
+            } else {
+                if (buf.cpbuf_push(out, c) < 0) { return 0 - errno.UERR_NOSPACE; }
+                if (cc == 0) { starter = out.len - 1; }
+                last_cc = cc;
+            }
+        }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// ---- public API ----
+
+fn nfd(cps as *i32, n as i64, out as *buf.CpBuf) as i64 {
+    let is *buf.CpBuf as tmp = _scratch_get();
+    if (_decompose_all(cps, n, 0, tmp) < 0) { return 0 - errno.UERR_NOSPACE; }
+    if (buf.cpbuf_append(out, tmp.ptr, tmp.len) < 0) { return 0 - errno.UERR_NOSPACE; }
+    return tmp.len;
+}
+
+fn nfkd(cps as *i32, n as i64, out as *buf.CpBuf) as i64 {
+    let is *buf.CpBuf as tmp = _scratch_get();
+    if (_decompose_all(cps, n, 1, tmp) < 0) { return 0 - errno.UERR_NOSPACE; }
+    if (buf.cpbuf_append(out, tmp.ptr, tmp.len) < 0) { return 0 - errno.UERR_NOSPACE; }
+    return tmp.len;
+}
+
+fn nfc(cps as *i32, n as i64, out as *buf.CpBuf) as i64 {
+    let is *buf.CpBuf as tmp = _scratch_get();
+    if (_decompose_all(cps, n, 0, tmp) < 0) { return 0 - errno.UERR_NOSPACE; }
+    return compose_run(tmp.ptr, tmp.len, out);
+}
+
+fn nfkc(cps as *i32, n as i64, out as *buf.CpBuf) as i64 {
+    let is *buf.CpBuf as tmp = _scratch_get();
+    if (_decompose_all(cps, n, 1, tmp) < 0) { return 0 - errno.UERR_NOSPACE; }
+    return compose_run(tmp.ptr, tmp.len, out);
+}
+
+// 1 if the run is already in the given normal form, else 0. Correct (not the
+// quick-check fast path): it normalizes and compares.
+fn _eq_norm(cps as *i32, n as i64, form as i32) as i64 {
+    let is buf.CpBuf as o = buf.cpbuf_new(64);
+    let is i64 as r with mut = 0;
+    if (form == 0)      { r = nfd(cps, n, &o); }
+    else if (form == 1) { r = nfc(cps, n, &o); }
+    else if (form == 2) { r = nfkd(cps, n, &o); }
+    else                { r = nfkc(cps, n, &o); }
+    let is i64 as same with mut = 0;
+    if (r == n) {
+        same = 1;
+        let is i64 as i with mut = 0;
+        while (i < n) {
+            if (o.ptr[i] != cps[i]) { same = 0; i = n; }
+            else { i = i + 1; }
+        }
+    }
+    buf.cpbuf_free(&o);
+    return same;
+}
+
+fn is_nfd(cps as *i32, n as i64) as i64 { return _eq_norm(cps, n, 0); }
+fn is_nfc(cps as *i32, n as i64) as i64 { return _eq_norm(cps, n, 1); }
+
+// ---- UTF-8 wrappers ----
+
+fn _norm_u8(src as *u8, n as i64, form as i32, out as *buf.ByteBuf) as i64 {
+    let is buf.CpBuf as inb = buf.cpbuf_new(64);
+    if (utf8.to_cps(src, n, &inb) < 0) { buf.cpbuf_free(&inb); return 0 - errno.UERR_INVALID; }
+    let is buf.CpBuf as outb = buf.cpbuf_new(64);
+    let is i64 as r with mut = 0;
+    if (form == 0)      { r = nfd(inb.ptr, inb.len, &outb); }
+    else if (form == 1) { r = nfc(inb.ptr, inb.len, &outb); }
+    else if (form == 2) { r = nfkd(inb.ptr, inb.len, &outb); }
+    else                { r = nfkc(inb.ptr, inb.len, &outb); }
+    if (r < 0) { buf.cpbuf_free(&inb); buf.cpbuf_free(&outb); return r; }
+    let is i64 as br = utf8.from_cps(outb.ptr, outb.len, out);
+    buf.cpbuf_free(&inb);
+    buf.cpbuf_free(&outb);
+    return br;
+}
+
+fn nfd_u8(src as *u8, n as i64, out as *buf.ByteBuf) as i64  { return _norm_u8(src, n, 0, out); }
+fn nfc_u8(src as *u8, n as i64, out as *buf.ByteBuf) as i64  { return _norm_u8(src, n, 1, out); }
+fn nfkd_u8(src as *u8, n as i64, out as *buf.ByteBuf) as i64 { return _norm_u8(src, n, 2, out); }
+fn nfkc_u8(src as *u8, n as i64, out as *buf.ByteBuf) as i64 { return _norm_u8(src, n, 3, out); }

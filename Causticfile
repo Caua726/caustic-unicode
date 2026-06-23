@@ -22,6 +22,16 @@ target "test_width" {
     out "build/test_width"
 }
 
+target "test_normalize" {
+    src "tests/test_normalize.cst"
+    out "build/test_normalize"
+}
+
+target "conf_normalize" {
+    src "tests/conformance/conf_normalize.cst"
+    out "build/conf_normalize"
+}
+
 script "test" {
     "bash tests/run.sh"
 }

@@ -35,8 +35,10 @@ fi
 
 run_case test_buf   tests/test_buf.cst
 run_case test_ucd   tests/test_ucd.cst
-run_case test_utf   tests/test_utf.cst
-run_case test_width tests/test_width.cst
+run_case test_utf       tests/test_utf.cst
+run_case test_width     tests/test_width.cst
+run_case test_normalize tests/test_normalize.cst
+run_case conf_normalize tests/conformance/conf_normalize.cst
 
 if [ "$fail" -eq 0 ]; then echo "all green"; else echo "FAILURES"; fi
 exit $fail

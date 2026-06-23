@@ -27,6 +27,16 @@ fn blob_u16(chunks as **u8, i as i32) as i32 {
     return cast(i32, base[ic]) | (cast(i32, base[ic + 1]) << 8);
 }
 
+// Read little-endian u32 element `i` from a chunked byte blob (4 bytes/elem,
+// 4096-byte chunks → never straddles a chunk boundary).
+fn blob_u32(chunks as **u8, i as i32) as i32 {
+    let is i32 as bo = i << 2;
+    let is *u8 as base = chunks[bo >> 12];
+    let is i32 as ic = bo & 4095;
+    return cast(i32, base[ic]) | (cast(i32, base[ic + 1]) << 8)
+         | (cast(i32, base[ic + 2]) << 16) | (cast(i32, base[ic + 3]) << 24);
+}
+
 // Two-level trie lookup. Returns `def` for out-of-range code points.
 fn lookup2(index_chunks as **u8, data_chunks as **u8, cp as i32, maxcp as i32, def as i32) as i32 {
     if (cp < 0 || cp > maxcp) { return def; }

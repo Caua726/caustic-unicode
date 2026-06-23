@@ -223,6 +223,47 @@ fn emit_u16_blob(w as *io.Writer, name as *u8, kind as *u8, data as *u16, count 
     return nchunks;
 }
 
+// Emit a u32 array as chunked \xNN string-init globals (little-endian).
+// Returns the number of chunks emitted.
+fn emit_u32_blob(w as *io.Writer, name as *u8, kind as *u8, data as *u32, count as i32) as i32 {
+    let is i32 as total = count << 2;                 // bytes
+    let is i32 as nchunks = (total + 4095) / 4096;
+    let is i32 as k with mut = 0;
+    while (k < nchunks) {
+        ws(w, "let is *u8 as "); wn(w, name, kind); io.put(w, 95); wi(w, k);
+        ws(w, " with imut = \"");
+        let is i32 as start = k * 4096;
+        let is i32 as end with mut = start + 4096;
+        if (end > total) { end = total; }
+        let is i32 as bp with mut = start;
+        while (bp < end) {
+            let is i32 as v = cast(i32, data[bp >> 2]);
+            let is i32 as sh = (bp & 3) << 3;          // 0, 8, 16, 24
+            emit_byte_hex(w, cast(u8, (v >> sh) & 255));
+            bp = bp + 1;
+        }
+        ws(w, "\";\n");
+        k = k + 1;
+    }
+    return nchunks;
+}
+
+// Emit a flat u32 array as chunked globals + a <name>_at(i) reader.
+fn emit_flat_u32(w as *io.Writer, name as *u8, data as *u32, count as i32) as void {
+    let is i32 as nc = emit_u32_blob(w, name, "", data, count);
+    ws(w, "\nlet is ["); wi(w, nc); ws(w, "]*u8 as "); wn(w, name, "_chunks with mut;\n");
+    ws(w, "let is i32 as "); wn(w, name, "_ready with mut = 0;\n");
+    ws(w, "fn "); wn(w, name, "_init() as void {\n  if ("); wn(w, name, "_ready == 1) { return; }\n");
+    let is i32 as i with mut = 0;
+    while (i < nc) {
+        ws(w, "  "); wn(w, name, "_chunks["); wi(w, i); ws(w, "] = "); wn(w, name, "_"); wi(w, i); ws(w, ";\n");
+        i = i + 1;
+    }
+    ws(w, "  "); wn(w, name, "_ready = 1;\n}\n");
+    ws(w, "fn "); wn(w, name, "_at(i as i32) as i32 {\n  if ("); wn(w, name, "_ready == 0) { "); wn(w, name, "_init(); }\n");
+    ws(w, "  return trie.blob_u32(cast(**u8, &"); wn(w, name, "_chunks), i);\n}\n");
+}
+
 // Emit the chunk-pointer arrays, init(), constants and the <name>_get()
 // accessor that drives ucd/trie.cst:lookup2.
 fn emit_tail(w as *io.Writer, name as *u8, nidx as i32, ndat as i32, maxcp as i32, def as i32) as void {
@@ -255,12 +296,10 @@ fn emit_tail(w as *io.Writer, name as *u8, nidx as i32, ndat as i32, maxcp as i3
     wn(w, name, "_data_chunks), cp, "); wn(w, name, "_maxcp, "); wn(w, name, "_default);\n}\n");
 }
 
-// Build the trie from a filled flat[NUMCP] array and write <path>.
-// `name` is the table prefix used for every generated symbol.
-fn build_and_emit(path as *u8, name as *u8, prefix as *u8, flat as *u16, def as i32, maxcp as i32, names as *i64, ncount as i32) as i32 {
-    let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
-    let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
-    if (cast(i64, index) == 0 || cast(i64, data) == 0) { return cast(i32, 0 - 1); }
+// Compress flat[NUMCP] into a 2-level trie: fills index[NBLOCKS] with block
+// ids and data[] with the deduplicated 32-cp blocks. Block id 0 is the
+// all-default block. Returns the data length (in u16 elements).
+fn build_trie(flat as *u16, def as i32, index as *u16, data as *u16) as i32 {
     let is i32 as data_count with mut = 0;
     let is map.MapI64 as dmap = map.mapi64_new();
 
@@ -289,6 +328,16 @@ fn build_and_emit(path as *u8, name as *u8, prefix as *u8, flat as *u16, def as 
         index[b] = cast(u16, id);
         b = b + 1;
     }
+    return data_count;
+}
+
+// Build the trie from a filled flat[NUMCP] array and write <path>.
+// `name` is the table prefix used for every generated symbol.
+fn build_and_emit(path as *u8, name as *u8, prefix as *u8, flat as *u16, def as i32, maxcp as i32, names as *i64, ncount as i32) as i32 {
+    let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
+    let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, index) == 0 || cast(i64, data) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as data_count = build_trie(flat, def, index, data);
 
     let is i64 as fd = io._open_write(path);
     if (fd < 0) { return cast(i32, 0 - 1); }
@@ -653,6 +702,225 @@ fn gen_bidi() as i32 {
     return build_and_emit("ucd/tables/bidi.cst", "bidi", "BIDI", flat, 0, U_MAXCP, it.names, it.count);
 }
 
+// ---- Decomposition (UnicodeData.txt field 5) ----
+// trie cp -> meta index (0 = no decomposition). meta record is a packed u32:
+//   bits 0..19 = pool offset, 20..27 = length, 28 = is_compatibility.
+// pool holds the decomposition code points (u32 each). Canonical and
+// compatibility decompositions share the table; the flag tells them apart
+// (NFD uses canonical only; NFKD uses both).
+fn gen_decomp() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/UnicodeData.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is *u32 as meta = cast(*u32, mem.core.mmap_anon(cast(i64, 30000) * 4));
+    let is *u32 as pool = cast(*u32, mem.core.mmap_anon(cast(i64, 100000) * 4));
+    if (cast(i64, flat) == 0 || cast(i64, meta) == 0 || cast(i64, pool) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as meta_count with mut = 1;   // index 0 reserved = "no decomposition"
+    meta[0] = cast(u32, 0);
+    let is i32 as pool_count with mut = 0;
+
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as f5e with mut = 0;
+            let is i32 as f5s = field(lp, llen, 5, &f5e);
+            if (f0s >= 0 && f5s >= 0 && f5e > f5s) {
+                let is i32 as cp = parse_hex(lp, f0s, f0e);
+                let is i32 as is_compat with mut = 0;
+                let is i32 as q with mut = f5s;
+                while (q < f5e && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                if (q < f5e && lp[q] == 60) {                 // '<' compatibility tag
+                    is_compat = 1;
+                    while (q < f5e && lp[q] != 62) { q = q + 1; }   // skip to '>'
+                    if (q < f5e) { q = q + 1; }
+                }
+                let is i32 as off = pool_count;
+                let is i32 as dn with mut = 0;
+                while (q < f5e) {
+                    while (q < f5e && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                    let is i32 as ts = q;
+                    while (q < f5e && lp[q] != 32 && lp[q] != 9) { q = q + 1; }
+                    if (q > ts) {
+                        pool[pool_count] = cast(u32, parse_hex(lp, ts, q));
+                        pool_count = pool_count + 1;
+                        dn = dn + 1;
+                    }
+                }
+                if (dn > 0 && cp >= 0 && cp < NUMCP) {
+                    meta[meta_count] = cast(u32, off) | (cast(u32, dn) << 20) | (cast(u32, is_compat) << 28);
+                    flat[cp] = cast(u16, meta_count);
+                    meta_count = meta_count + 1;
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
+    let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is i32 as data_count = build_trie(flat, 0, index, data);
+    let is i64 as fd = io._open_write("ucd/tables/decomp.cst");
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst from UnicodeData.txt field 5 (Unicode 16.0). DO NOT EDIT.\n");
+    ws(&w, "// trie: cp -> meta index (0 = none). meta packed u32: off(0..19) len(20..27) compat(28).\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    let is i32 as nidx = emit_u16_blob(&w, "decomp", "_index", index, NBLOCKS);
+    let is i32 as ndat = emit_u16_blob(&w, "decomp", "_data", data, data_count);
+    emit_tail(&w, "decomp", nidx, ndat, U_MAXCP, 0);
+    emit_flat_u32(&w, "decomp_meta", meta, meta_count);
+    emit_flat_u32(&w, "decomp_pool", pool, pool_count);
+    io.flush(&w);
+    io._close_fd(fd);
+    io.write_str(1, "decomp:  meta="); io.write_int(1, cast(i64, meta_count));
+    io.write_str(1, " pool="); io.write_int(1, cast(i64, pool_count)); io.write_str(1, "\n");
+    return 0;
+}
+
+// In-place quicksort of an i64 array over [lo, hi].
+fn qsort_i64(a as *i64, lo as i32, hi as i32) as void {
+    if (lo >= hi) { return; }
+    let is i64 as pivot = a[(lo + hi) / 2];
+    let is i32 as i with mut = lo;
+    let is i32 as j with mut = hi;
+    while (i <= j) {
+        while (a[i] < pivot) { i = i + 1; }
+        while (a[j] > pivot) { j = j - 1; }
+        if (i <= j) {
+            let is i64 as t = a[i]; a[i] = a[j]; a[j] = t;
+            i = i + 1; j = j - 1;
+        }
+    }
+    if (lo < j) { qsort_i64(a, lo, j); }
+    if (i < hi) { qsort_i64(a, i, hi); }
+}
+
+// ---- Canonical composition (NFC) ----
+// Primary composites: cps with a canonical decomposition [a,b] that are NOT
+// in Full_Composition_Exclusion (DerivedNormalizationProps.txt). Emitted as
+// three parallel u32 arrays (ca, cb, cc) sorted by (a,b) for binary search.
+fn gen_compose() as i32 {
+    // 1. Full_Composition_Exclusion set.
+    let is i32 as dlen with mut = 0;
+    let is *u8 as dp = slurp("tools/ucd/DerivedNormalizationProps.txt", &dlen);
+    if (cast(i64, dp) == 0) { return cast(i32, 0 - 1); }
+    let is *u8 as excl = mem.core.mmap_anon(cast(i64, NUMCP));
+    if (cast(i64, excl) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as pos with mut = 0;
+    while (pos < dlen) {
+        let is i32 as le = line_end(dp, dlen, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0 && dp[pos] != 35) {
+            let is *u8 as lp = cast(*u8, cast(i64, dp) + pos);
+            let is i32 as semi = find_char(lp, 0, llen, 59);
+            if (semi >= 0) {
+                let is i32 as vs with mut = semi + 1;
+                let is i32 as ve with mut = llen;
+                let is i32 as hh = find_char(lp, vs, llen, 35);
+                if (hh >= 0) { ve = hh; }
+                let is i32 as semi2 = find_char(lp, vs, ve, 59);
+                if (semi2 >= 0) { ve = semi2; }
+                while (vs < ve && (lp[vs] == 32 || lp[vs] == 9)) { vs = vs + 1; }
+                while (ve > vs && (lp[ve - 1] == 32 || lp[ve - 1] == 9 || lp[ve - 1] == 13)) { ve = ve - 1; }
+                if (slice_eq(lp, vs, ve, "Full_Composition_Exclusion") == 1) {
+                    let is i32 as lo with mut = 0;
+                    let is i32 as hi with mut = 0;
+                    parse_range(lp, 0, semi, &lo, &hi);
+                    if (lo >= 0 && hi >= lo && hi < NUMCP) {
+                        let is i32 as c with mut = lo;
+                        while (c <= hi) { excl[c] = cast(u8, 1); c = c + 1; }
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    // 2. canonical length-2 decompositions that are not excluded.
+    let is i32 as ulen with mut = 0;
+    let is *u8 as up = slurp("tools/ucd/UnicodeData.txt", &ulen);
+    if (cast(i64, up) == 0) { return cast(i32, 0 - 1); }
+    let is *i64 as packed = cast(*i64, mem.core.mmap_anon(cast(i64, 4000) * 8));
+    if (cast(i64, packed) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as npairs with mut = 0;
+    pos = 0;
+    while (pos < ulen) {
+        let is i32 as le = line_end(up, ulen, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, up) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as f5e with mut = 0;
+            let is i32 as f5s = field(lp, llen, 5, &f5e);
+            if (f0s >= 0 && f5s >= 0 && f5e > f5s) {
+                let is i32 as cp = parse_hex(lp, f0s, f0e);
+                let is i32 as q with mut = f5s;
+                while (q < f5e && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                if (q < f5e && lp[q] != 60) {            // canonical (no '<tag>')
+                    let is i32 as a with mut = cast(i32, 0 - 1);
+                    let is i32 as b with mut = cast(i32, 0 - 1);
+                    let is i32 as cnt with mut = 0;
+                    while (q < f5e) {
+                        while (q < f5e && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                        let is i32 as ts = q;
+                        while (q < f5e && lp[q] != 32 && lp[q] != 9) { q = q + 1; }
+                        if (q > ts) {
+                            let is i32 as dcp = parse_hex(lp, ts, q);
+                            if (cnt == 0) { a = dcp; }
+                            if (cnt == 1) { b = dcp; }
+                            cnt = cnt + 1;
+                        }
+                    }
+                    if (cnt == 2 && cp >= 0 && cp < NUMCP && excl[cp] == 0) {
+                        packed[npairs] = (cast(i64, a) << 42) | (cast(i64, b) << 21) | cast(i64, cp);
+                        npairs = npairs + 1;
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    // 3. sort by (a,b,cp) and unpack.
+    qsort_i64(packed, 0, npairs - 1);
+    let is *u32 as ca = cast(*u32, mem.core.mmap_anon(cast(i64, npairs) * 4));
+    let is *u32 as cb = cast(*u32, mem.core.mmap_anon(cast(i64, npairs) * 4));
+    let is *u32 as cc = cast(*u32, mem.core.mmap_anon(cast(i64, npairs) * 4));
+    let is i32 as i with mut = 0;
+    while (i < npairs) {
+        let is i64 as k = packed[i];
+        cc[i] = cast(u32, k & 2097151);                   // bits 0..20
+        cb[i] = cast(u32, (k >> 21) & 2097151);
+        ca[i] = cast(u32, (k >> 42) & 2097151);
+        i = i + 1;
+    }
+
+    // 4. emit.
+    let is i64 as fd = io._open_write("ucd/tables/compose.cst");
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst (Unicode 16.0). DO NOT EDIT.\n");
+    ws(&w, "// Primary composites (a,b)->c, sorted by (a,b) for binary search.\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    emit_flat_u32(&w, "compose_a", ca, npairs);
+    emit_flat_u32(&w, "compose_b", cb, npairs);
+    emit_flat_u32(&w, "compose_c", cc, npairs);
+    ws(&w, "let is i32 as compose_count with imut = "); wi(&w, npairs); ws(&w, ";\n");
+    io.flush(&w);
+    io._close_fd(fd);
+    io.write_str(1, "compose:  pairs="); io.write_int(1, cast(i64, npairs)); io.write_str(1, "\n");
+    return 0;
+}
+
 fn main() as i32 {
     if (gen_gc() < 0)  { return 1; }
     if (gen_ccc() < 0) { return 2; }
@@ -663,6 +931,8 @@ fn main() as i32 {
     if (gen_enum_file("tools/ucd/WordBreakProperty.txt", "ucd/tables/wb.cst", "wb", "WB", "Other", U_MAXCP) < 0) { return 7; }
     if (gen_enum_file("tools/ucd/SentenceBreakProperty.txt", "ucd/tables/sb.cst", "sb", "SB", "Other", U_MAXCP) < 0) { return 8; }
     if (gen_bidi() < 0) { return 9; }
+    if (gen_decomp() < 0) { return 10; }
+    if (gen_compose() < 0) { return 11; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }

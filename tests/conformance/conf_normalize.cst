@@ -1,0 +1,188 @@
+// =======================================================
+// tests/conformance/conf_normalize.cst
+// Runs the official Unicode NormalizationTest.txt (16.0) in full.
+// For each line with columns c1;c2;c3;c4;c5 the standard invariants are:
+//   NFC:  c2 = NFC(c1)=NFC(c2)=NFC(c3),  c4 = NFC(c4)=NFC(c5)
+//   NFD:  c3 = NFD(c1)=NFD(c2)=NFD(c3),  c5 = NFD(c4)=NFD(c5)
+//   NFKC: c4 = NFKC(c1..c5)
+//   NFKD: c5 = NFKD(c1..c5)
+// Exit 0 = every line passes. On failure, prints "line N check K" and
+// returns nonzero. Reads the vector via mmap (the io heap caps at 64 KB).
+// =======================================================
+
+use "std/io.cst"  as io;
+use "std/mem.cst" only bins, core as mem;
+use "../../normalize/normalize.cst" as nz;
+use "../../core/buf.cst"            as buf;
+
+fn slurp(path as *u8, out_len as *i32) as *u8 {
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return cast(*u8, 0); }
+    let is i64 as size = io._lseek(fd, 0, io._SEEK_END);
+    io._lseek(fd, 0, io._SEEK_SET);
+    if (size <= 0) { io._close_fd(fd); return cast(*u8, 0); }
+    let is *u8 as b = mem.core.mmap_anon(size + 1);
+    io.read_exact(fd, b, size);
+    io._close_fd(fd);
+    out_len[0] = cast(i32, size);
+    return b;
+}
+
+fn line_end(p as *u8, len as i32, pos as i32) as i32 {
+    let is i32 as i with mut = pos;
+    while (i < len) { if (p[i] == 10) { return i; } i = i + 1; }
+    return len;
+}
+
+// Start of ';'-field idx in line[0..llen); writes its end to *endout, -1 if absent.
+fn field(p as *u8, llen as i32, idx as i32, endout as *i32) as i32 {
+    let is i32 as cur with mut = 0;
+    let is i32 as i with mut = 0;
+    let is i32 as fstart with mut = 0;
+    while (cur < idx) {
+        while (i < llen && p[i] != 59) { i = i + 1; }
+        if (i >= llen) { return cast(i32, 0 - 1); }
+        i = i + 1; cur = cur + 1; fstart = i;
+    }
+    let is i32 as e with mut = fstart;
+    while (e < llen && p[e] != 59) { e = e + 1; }
+    endout[0] = e;
+    return fstart;
+}
+
+fn hexval(c as u8) as i32 {
+    if (c >= 48 && c <= 57)  { return cast(i32, c) - 48; }
+    if (c >= 65 && c <= 70)  { return cast(i32, c) - 55; }
+    if (c >= 97 && c <= 102) { return cast(i32, c) - 87; }
+    return cast(i32, 0 - 1);
+}
+
+fn parse_hex(p as *u8, s as i32, e as i32) as i32 {
+    let is i32 as v with mut = 0;
+    let is i32 as i with mut = s;
+    while (i < e) {
+        let is i32 as d = hexval(p[i]);
+        if (d < 0) { return v; }
+        v = (v << 4) | d;
+        i = i + 1;
+    }
+    return v;
+}
+
+// Parse a field of space-separated hex code points into `out`.
+fn parse_field(p as *u8, s as i32, e as i32, out as *buf.CpBuf) as void {
+    buf.cpbuf_reset(out);
+    let is i32 as q with mut = s;
+    while (q < e) {
+        while (q < e && p[q] == 32) { q = q + 1; }
+        let is i32 as ts = q;
+        while (q < e && p[q] != 32) { q = q + 1; }
+        if (q > ts) { buf.cpbuf_push(out, parse_hex(p, ts, q)); }
+    }
+}
+
+fn cbeq(a as *buf.CpBuf, b as *buf.CpBuf) as i32 {
+    if (a.len != b.len) { return 0; }
+    let is i64 as i with mut = 0;
+    while (i < a.len) {
+        if (a.ptr[i] != b.ptr[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Normalize src by form (0 NFD, 1 NFC, 2 NFKD, 3 NFKC) into r.
+fn run(form as i32, src as *buf.CpBuf, r as *buf.CpBuf) as void {
+    buf.cpbuf_reset(r);
+    if (form == 0)      { nz.nfd(src.ptr, src.len, r); }
+    else if (form == 1) { nz.nfc(src.ptr, src.len, r); }
+    else if (form == 2) { nz.nfkd(src.ptr, src.len, r); }
+    else                { nz.nfkc(src.ptr, src.len, r); }
+}
+
+fn chk(form as i32, src as *buf.CpBuf, exp as *buf.CpBuf, r as *buf.CpBuf) as i32 {
+    run(form, src, r);
+    return cbeq(r, exp);
+}
+
+fn fail(line as i32, check as i32) as i32 {
+    io.write_str(1, "FAIL line "); io.write_int(1, cast(i64, line));
+    io.write_str(1, " check "); io.write_int(1, cast(i64, check));
+    io.write_str(1, "\n");
+    return 1;
+}
+
+fn main() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tests/vectors/NormalizationTest.txt", &len);
+    if (cast(i64, p) == 0) { io.write_str(1, "cannot read NormalizationTest.txt\n"); return 99; }
+
+    let is buf.CpBuf as c0 = buf.cpbuf_new(16);
+    let is buf.CpBuf as c1 = buf.cpbuf_new(16);
+    let is buf.CpBuf as c2 = buf.cpbuf_new(16);
+    let is buf.CpBuf as c3 = buf.cpbuf_new(16);
+    let is buf.CpBuf as c4 = buf.cpbuf_new(16);
+    let is buf.CpBuf as r  = buf.cpbuf_new(16);
+
+    let is i32 as lineno with mut = 0;
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        lineno = lineno + 1;
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            if (lp[0] != 35 && lp[0] != 64) {           // skip '#' and '@'
+                let is i32 as f0e with mut = 0;
+                let is i32 as f0s = field(lp, llen, 0, &f0e);
+                let is i32 as f1e with mut = 0;
+                let is i32 as f1s = field(lp, llen, 1, &f1e);
+                let is i32 as f2e with mut = 0;
+                let is i32 as f2s = field(lp, llen, 2, &f2e);
+                let is i32 as f3e with mut = 0;
+                let is i32 as f3s = field(lp, llen, 3, &f3e);
+                let is i32 as f4e with mut = 0;
+                let is i32 as f4s = field(lp, llen, 4, &f4e);
+                if (f0s >= 0 && f1s >= 0 && f2s >= 0 && f3s >= 0 && f4s >= 0) {
+                    parse_field(lp, f0s, f0e, &c0);
+                    parse_field(lp, f1s, f1e, &c1);
+                    parse_field(lp, f2s, f2e, &c2);
+                    parse_field(lp, f3s, f3e, &c3);
+                    parse_field(lp, f4s, f4e, &c4);
+
+                    // NFC: c1 == NFC(c0,c1,c2); c3 == NFC(c3,c4)
+                    if (chk(1, &c0, &c1, &r) == 0) { return fail(lineno, 1); }
+                    if (chk(1, &c1, &c1, &r) == 0) { return fail(lineno, 2); }
+                    if (chk(1, &c2, &c1, &r) == 0) { return fail(lineno, 3); }
+                    if (chk(1, &c3, &c3, &r) == 0) { return fail(lineno, 4); }
+                    if (chk(1, &c4, &c3, &r) == 0) { return fail(lineno, 5); }
+
+                    // NFD: c2 == NFD(c0,c1,c2); c4 == NFD(c3,c4)
+                    if (chk(0, &c0, &c2, &r) == 0) { return fail(lineno, 6); }
+                    if (chk(0, &c1, &c2, &r) == 0) { return fail(lineno, 7); }
+                    if (chk(0, &c2, &c2, &r) == 0) { return fail(lineno, 8); }
+                    if (chk(0, &c3, &c4, &r) == 0) { return fail(lineno, 9); }
+                    if (chk(0, &c4, &c4, &r) == 0) { return fail(lineno, 10); }
+
+                    // NFKC: c3 == NFKC(c0..c4)
+                    if (chk(3, &c0, &c3, &r) == 0) { return fail(lineno, 11); }
+                    if (chk(3, &c1, &c3, &r) == 0) { return fail(lineno, 12); }
+                    if (chk(3, &c2, &c3, &r) == 0) { return fail(lineno, 13); }
+                    if (chk(3, &c3, &c3, &r) == 0) { return fail(lineno, 14); }
+                    if (chk(3, &c4, &c3, &r) == 0) { return fail(lineno, 15); }
+
+                    // NFKD: c4 == NFKD(c0..c4)
+                    if (chk(2, &c0, &c4, &r) == 0) { return fail(lineno, 16); }
+                    if (chk(2, &c1, &c4, &r) == 0) { return fail(lineno, 17); }
+                    if (chk(2, &c2, &c4, &r) == 0) { return fail(lineno, 18); }
+                    if (chk(2, &c3, &c4, &r) == 0) { return fail(lineno, 19); }
+                    if (chk(2, &c4, &c4, &r) == 0) { return fail(lineno, 20); }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    io.write_str(1, "conf_normalize: all lines pass\n");
+    return 0;
+}
