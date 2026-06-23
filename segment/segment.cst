@@ -4,3 +4,5 @@
 // =======================================================
 
 use "grapheme.cst" as grapheme;
+use "word.cst"     as word;
+use "sentence.cst" as sentence;

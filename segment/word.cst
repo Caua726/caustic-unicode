@@ -1,0 +1,128 @@
+// =======================================================
+// caustic-unicode/segment/word.cst
+// Word boundaries (UAX #29, rules WB1-WB999). WB4 folds Extend/Format/ZWJ
+// into the preceding character, so the WB5-WB13 rules look at "significant"
+// neighbours (skipping those). Operates on a code-point run.
+// =======================================================
+
+use "../core/errno.cst"         as errno;
+use "../ucd/tables/wb.cst"      as wb;
+use "../ucd/tables/extpict.cst" as ep;
+
+struct WordIter { cps as *i32; n as i64; pos as i64; }
+
+fn word_iter(cps as *i32, n as i64) as WordIter {
+    let is WordIter as it;
+    it.cps = cps; it.n = n; it.pos = 0;
+    return it;
+}
+
+fn _p(cp as i32) as i64 { return cast(i64, wb.wb_get(cp)); }
+
+fn _ah(x as i64) as i64 {
+    if (x == wb.WB_ALetter || x == wb.WB_Hebrew_Letter) { return 1; }
+    return 0;
+}
+
+// Is x a significant char for WB4 (not Extend/Format/ZWJ)?
+fn _sig(x as i64) as i64 {
+    if (x == wb.WB_Extend || x == wb.WB_Format || x == wb.WB_ZWJ) { return 0; }
+    return 1;
+}
+
+// Previous significant index before i, or -1.
+fn _prev_sig(cps as *i32, i as i64) as i64 {
+    let is i64 as j with mut = i - 1;
+    while (j >= 0 && _sig(_p(cps[j])) == 0) { j = j - 1; }
+    return j;
+}
+
+// Next significant index at/after i, or n.
+fn _next_sig(cps as *i32, n as i64, i as i64) as i64 {
+    let is i64 as j with mut = i;
+    while (j < n && _sig(_p(cps[j])) == 0) { j = j + 1; }
+    return j;
+}
+
+// 1 if there is a word boundary between cps[i-1] and cps[i].
+fn _boundary(cps as *i32, n as i64, i as i64) as i64 {
+    let is i64 as prev = _p(cps[i - 1]);
+    let is i64 as cur  = _p(cps[i]);
+
+    if (prev == wb.WB_CR && cur == wb.WB_LF) { return 0; }                              // WB3
+    if (prev == wb.WB_Newline || prev == wb.WB_CR || prev == wb.WB_LF) { return 1; }    // WB3a
+    if (cur == wb.WB_Newline || cur == wb.WB_CR || cur == wb.WB_LF) { return 1; }       // WB3b
+    if (prev == wb.WB_ZWJ && ep.extpict_get(cps[i]) == 1) { return 0; }                 // WB3c
+    if (prev == wb.WB_WSegSpace && cur == wb.WB_WSegSpace) { return 0; }                // WB3d
+    if (cur == wb.WB_Extend || cur == wb.WB_Format || cur == wb.WB_ZWJ) { return 0; }   // WB4
+
+    let is i64 as ai = _prev_sig(cps, i);
+    if (ai < 0) { return 1; }
+    let is i64 as a = _p(cps[ai]);
+    let is i64 as b = cur;
+
+    if (_ah(a) == 1 && _ah(b) == 1) { return 0; }                                       // WB5
+    if (_ah(a) == 1 && (b == wb.WB_MidLetter || b == wb.WB_MidNumLet || b == wb.WB_Single_Quote)) {   // WB6
+        let is i64 as ni = _next_sig(cps, n, i + 1);
+        if (ni < n && _ah(_p(cps[ni])) == 1) { return 0; }
+    }
+    if ((a == wb.WB_MidLetter || a == wb.WB_MidNumLet || a == wb.WB_Single_Quote) && _ah(b) == 1) {   // WB7
+        let is i64 as aai = _prev_sig(cps, ai);
+        if (aai >= 0 && _ah(_p(cps[aai])) == 1) { return 0; }
+    }
+    if (a == wb.WB_Hebrew_Letter && b == wb.WB_Single_Quote) { return 0; }              // WB7a
+    if (a == wb.WB_Hebrew_Letter && b == wb.WB_Double_Quote) {                          // WB7b
+        let is i64 as ni = _next_sig(cps, n, i + 1);
+        if (ni < n && _p(cps[ni]) == wb.WB_Hebrew_Letter) { return 0; }
+    }
+    if (a == wb.WB_Double_Quote && b == wb.WB_Hebrew_Letter) {                          // WB7c
+        let is i64 as aai = _prev_sig(cps, ai);
+        if (aai >= 0 && _p(cps[aai]) == wb.WB_Hebrew_Letter) { return 0; }
+    }
+    if (a == wb.WB_Numeric && b == wb.WB_Numeric) { return 0; }                         // WB8
+    if (_ah(a) == 1 && b == wb.WB_Numeric) { return 0; }                                // WB9
+    if (a == wb.WB_Numeric && _ah(b) == 1) { return 0; }                                // WB10
+    if ((a == wb.WB_MidNum || a == wb.WB_MidNumLet || a == wb.WB_Single_Quote) && b == wb.WB_Numeric) {  // WB11
+        let is i64 as aai = _prev_sig(cps, ai);
+        if (aai >= 0 && _p(cps[aai]) == wb.WB_Numeric) { return 0; }
+    }
+    if (a == wb.WB_Numeric && (b == wb.WB_MidNum || b == wb.WB_MidNumLet || b == wb.WB_Single_Quote)) {  // WB12
+        let is i64 as ni = _next_sig(cps, n, i + 1);
+        if (ni < n && _p(cps[ni]) == wb.WB_Numeric) { return 0; }
+    }
+    if (a == wb.WB_Katakana && b == wb.WB_Katakana) { return 0; }                       // WB13
+    if ((_ah(a) == 1 || a == wb.WB_Numeric || a == wb.WB_Katakana || a == wb.WB_ExtendNumLet) && b == wb.WB_ExtendNumLet) { return 0; }   // WB13a
+    if (a == wb.WB_ExtendNumLet && (_ah(b) == 1 || b == wb.WB_Numeric || b == wb.WB_Katakana)) { return 0; }   // WB13b
+
+    if (a == wb.WB_Regional_Indicator && b == wb.WB_Regional_Indicator) {               // WB15/16
+        let is i64 as cnt with mut = 0;
+        let is i64 as j with mut = ai;
+        while (j >= 0 && _p(cps[j]) == wb.WB_Regional_Indicator) {
+            cnt = cnt + 1;
+            j = _prev_sig(cps, j);
+        }
+        if ((cnt & 1) == 1) { return 0; }
+    }
+
+    return 1;                                                                           // WB999
+}
+
+fn word_next(it as *WordIter) as i64 {
+    if (it.pos >= it.n) { return 0 - errno.UERR_END; }
+    let is i64 as p with mut = it.pos + 1;
+    while (p < it.n && _boundary(it.cps, it.n, p) == 0) { p = p + 1; }
+    it.pos = p;
+    return p;
+}
+
+fn word_is_boundary(cps as *i32, n as i64, i as i64) as i64 {
+    if (i <= 0 || i >= n) { return 1; }
+    return _boundary(cps, n, i);
+}
+
+fn word_count(cps as *i32, n as i64) as i64 {
+    let is WordIter as it = word_iter(cps, n);
+    let is i64 as c with mut = 0;
+    while (word_next(&it) >= 0) { c = c + 1; }
+    return c;
+}
