@@ -1,0 +1,272 @@
+// =======================================================
+// caustic-unicode/case/case.cst
+// Case mapping (lower/upper/title) and case folding, per UAX #21 /
+// SpecialCasing.txt / CaseFolding.txt, with locale tailoring for Turkish
+// (tr), Azerbaijani (az) and Lithuanian (lt).
+//
+// Simple (1:1) mappings are total functions on a code point. Full mappings
+// take a code-point run plus a locale and append to a caller CpBuf, because
+// full case mapping is context- and length-sensitive (ß -> SS, final sigma,
+// the Turkish dotted/dotless I, Lithuanian retained dots, ...).
+//
+// Titlecasing currently finds word starts via the cased/case-ignorable
+// heuristic; it will move to full UAX #29 word boundaries once the segment
+// module exists. Returns count appended, or 0 - errno.UERR_* on failure.
+// =======================================================
+
+use "../core/buf.cst"             as buf;
+use "../core/errno.cst"           as errno;
+use "../ucd/props.cst"            as props;
+use "../ucd/tables/simplecase.cst" as sc;
+use "../ucd/tables/fold.cst"      as fl;
+use "../ucd/tables/special.cst"   as sp;
+use "../utf/utf8.cst"             as utf8;
+
+let is i64 as LOC_ROOT with imut = 0;
+let is i64 as LOC_TR   with imut = 1;
+let is i64 as LOC_AZ   with imut = 2;
+let is i64 as LOC_LT   with imut = 3;
+
+// ---- simple (1:1) mappings ----
+
+fn to_lower_simple(cp as i32) as i32 {
+    let is i32 as idx = sc.simplecase_get(cp);
+    if (idx == 0) { return cp; }
+    return sc.simplecase_v_at(idx * 3 + 0);
+}
+fn to_upper_simple(cp as i32) as i32 {
+    let is i32 as idx = sc.simplecase_get(cp);
+    if (idx == 0) { return cp; }
+    return sc.simplecase_v_at(idx * 3 + 1);
+}
+fn to_title_simple(cp as i32) as i32 {
+    let is i32 as idx = sc.simplecase_get(cp);
+    if (idx == 0) { return cp; }
+    return sc.simplecase_v_at(idx * 3 + 2);
+}
+fn fold_simple(cp as i32) as i32 {
+    let is i32 as idx = fl.foldsimple_get(cp);
+    if (idx == 0) { return cp; }
+    return fl.foldsimple_v_at(idx);
+}
+
+// ---- SpecialCasing context conditions ----
+
+fn _cased_before(cps as *i32, i as i64) as i32 {
+    let is i64 as j with mut = i - 1;
+    while (j >= 0 && props.is_case_ignorable(cps[j]) == 1) { j = j - 1; }
+    if (j >= 0 && props.is_cased(cps[j]) == 1) { return 1; }
+    return 0;
+}
+fn _cased_after(cps as *i32, n as i64, i as i64) as i32 {
+    let is i64 as j with mut = i + 1;
+    while (j < n && props.is_case_ignorable(cps[j]) == 1) { j = j + 1; }
+    if (j < n && props.is_cased(cps[j]) == 1) { return 1; }
+    return 0;
+}
+fn _final_sigma(cps as *i32, n as i64, i as i64) as i32 {
+    if (_cased_before(cps, i) == 1 && _cased_after(cps, n, i) == 0) { return 1; }
+    return 0;
+}
+fn _more_above(cps as *i32, n as i64, i as i64) as i32 {
+    let is i64 as k with mut = i + 1;
+    while (k < n) {
+        let is i64 as cc = props.combining_class(cps[k]);
+        if (cc == 230) { return 1; }
+        if (cc == 0) { return 0; }
+        k = k + 1;
+    }
+    return 0;
+}
+fn _before_dot(cps as *i32, n as i64, i as i64) as i32 {
+    let is i64 as k with mut = i + 1;
+    while (k < n) {
+        if (cps[k] == 775) { return 1; }                 // U+0307 combining dot above
+        let is i64 as cc = props.combining_class(cps[k]);
+        if (cc == 0 || cc == 230) { return 0; }
+        k = k + 1;
+    }
+    return 0;
+}
+fn _after_soft_dotted(cps as *i32, i as i64) as i32 {
+    let is i64 as j with mut = i - 1;
+    while (j >= 0) {
+        if (props.is_soft_dotted(cps[j]) == 1) { return 1; }
+        let is i64 as cc = props.combining_class(cps[j]);
+        if (cc == 0 || cc == 230) { return 0; }
+        j = j - 1;
+    }
+    return 0;
+}
+fn _after_i(cps as *i32, i as i64) as i32 {
+    let is i64 as j with mut = i - 1;
+    while (j >= 0) {
+        if (cps[j] == 73) { return 1; }                  // U+0049 LATIN CAPITAL I
+        let is i64 as cc = props.combining_class(cps[j]);
+        if (cc == 0 || cc == 230) { return 0; }
+        j = j - 1;
+    }
+    return 0;
+}
+
+fn _eval_cond(cond as i32, locale as i64, cps as *i32, n as i64, i as i64) as i32 {
+    if (cond == 1) { return _final_sigma(cps, n, i); }
+    if (cond == 2) { if (locale == LOC_LT) { return 1; } return 0; }
+    if (cond == 3) { if (locale == LOC_LT && _more_above(cps, n, i) == 1) { return 1; } return 0; }
+    if (cond == 4) { if (locale == LOC_LT && _after_soft_dotted(cps, i) == 1) { return 1; } return 0; }
+    if (cond == 5) { if (locale == LOC_TR) { return 1; } return 0; }
+    if (cond == 6) { if (locale == LOC_TR && _before_dot(cps, n, i) == 0) { return 1; } return 0; }
+    if (cond == 7) { if (locale == LOC_TR && _after_i(cps, i) == 1) { return 1; } return 0; }
+    if (cond == 8) { if (locale == LOC_AZ) { return 1; } return 0; }
+    if (cond == 9) { if (locale == LOC_AZ && _before_dot(cps, n, i) == 0) { return 1; } return 0; }
+    if (cond == 10) { if (locale == LOC_AZ && _after_i(cps, i) == 1) { return 1; } return 0; }
+    return 0;
+}
+
+// which: 0 lower, 1 upper, 2 title. Returns 1 and appends the full mapping if
+// a special-casing entry applies; 0 if none (caller uses the simple mapping).
+fn _special_apply(cp as i32, which as i32, locale as i64, cps as *i32, n as i64, i as i64, out as *buf.CpBuf) as i32 {
+    let is i32 as lo with mut = 0;
+    let is i32 as hi with mut = sp.sc_count - 1;
+    let is i32 as found with mut = cast(i32, 0 - 1);
+    while (lo <= hi) {
+        let is i32 as mid = (lo + hi) / 2;
+        let is i32 as v = sp.sc_cp_at(mid);
+        if (v < cp) { lo = mid + 1; }
+        else if (v > cp) { hi = mid - 1; }
+        else { found = mid; hi = mid - 1; }
+    }
+    if (found < 0) { return 0; }
+
+    let is i32 as uncond with mut = cast(i32, 0 - 1);
+    let is i32 as chosen with mut = cast(i32, 0 - 1);
+    let is i32 as e with mut = found;
+    while (e < sp.sc_count && sp.sc_cp_at(e) == cp) {
+        let is i32 as hdr = sp.sc_hdr_at(e);
+        let is i32 as cond = (hdr >> 12) & 15;
+        if (cond == 0) { uncond = e; }
+        else {
+            if (chosen < 0 && _eval_cond(cond, locale, cps, n, i) == 1) { chosen = e; }
+        }
+        e = e + 1;
+    }
+    if (chosen < 0) { chosen = uncond; }
+    if (chosen < 0) { return 0; }
+
+    let is i32 as hdr = sp.sc_hdr_at(chosen);
+    let is i32 as lo_len = hdr & 15;
+    let is i32 as ti_len = (hdr >> 4) & 15;
+    let is i32 as up_len = (hdr >> 8) & 15;
+    let is i32 as base = sp.sc_off_at(chosen);
+    let is i32 as moff with mut = base;
+    let is i32 as mlen with mut = lo_len;
+    if (which == 1) { moff = base + lo_len + ti_len; mlen = up_len; }
+    else if (which == 2) { moff = base + lo_len; mlen = ti_len; }
+    let is i32 as k with mut = 0;
+    while (k < mlen) {
+        if (buf.cpbuf_push(out, sp.sc_pool_at(moff + k)) < 0) { return 1; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn _apply(which as i32, locale as i64, cps as *i32, n as i64, i as i64, out as *buf.CpBuf) as void {
+    if (_special_apply(cps[i], which, locale, cps, n, i, out) == 1) { return; }
+    let is i32 as cp = cps[i];
+    if (which == 0)      { buf.cpbuf_push(out, to_lower_simple(cp)); }
+    else if (which == 1) { buf.cpbuf_push(out, to_upper_simple(cp)); }
+    else                 { buf.cpbuf_push(out, to_title_simple(cp)); }
+}
+
+// ---- full mappings ----
+
+fn to_lower(cps as *i32, n as i64, locale as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as i with mut = 0;
+    while (i < n) { _apply(0, locale, cps, n, i, out); i = i + 1; }
+    return out.len - base;
+}
+fn to_upper(cps as *i32, n as i64, locale as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as i with mut = 0;
+    while (i < n) { _apply(1, locale, cps, n, i, out); i = i + 1; }
+    return out.len - base;
+}
+fn to_title(cps as *i32, n as i64, locale as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as want_title with mut = 1;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as c = cps[i];
+        if (props.is_cased(c) == 1) {
+            if (want_title == 1) { _apply(2, locale, cps, n, i, out); want_title = 0; }
+            else { _apply(0, locale, cps, n, i, out); }
+        } else {
+            _apply(0, locale, cps, n, i, out);
+            if (props.is_case_ignorable(c) == 0) { want_title = 1; }
+        }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// ---- full case folding ----
+
+fn fold_full(cps as *i32, n as i64, out as *buf.CpBuf) as i64 {
+    let is i64 as base = out.len;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as m = fl.foldfull_get(cps[i]);
+        if (m == 0) {
+            if (buf.cpbuf_push(out, cps[i]) < 0) { return 0 - errno.UERR_NOSPACE; }
+        } else {
+            let is i32 as rec = fl.foldfull_meta_at(m);
+            let is i32 as off = rec & 1048575;
+            let is i32 as ln = (rec >> 20) & 255;
+            let is i32 as k with mut = 0;
+            while (k < ln) {
+                if (buf.cpbuf_push(out, fl.foldfull_pool_at(off + k)) < 0) { return 0 - errno.UERR_NOSPACE; }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return out.len - base;
+}
+
+// Default caseless match: 1 if full-folding both runs yields equal sequences.
+fn eq_fold(a as *i32, an as i64, b as *i32, bn as i64) as i64 {
+    let is buf.CpBuf as fa = buf.cpbuf_new(32);
+    let is buf.CpBuf as fb = buf.cpbuf_new(32);
+    fold_full(a, an, &fa);
+    fold_full(b, bn, &fb);
+    let is i64 as eq with mut = 0;
+    if (fa.len == fb.len) {
+        eq = 1;
+        let is i64 as i with mut = 0;
+        while (i < fa.len) {
+            if (fa.ptr[i] != fb.ptr[i]) { eq = 0; i = fa.len; }
+            else { i = i + 1; }
+        }
+    }
+    buf.cpbuf_free(&fa);
+    buf.cpbuf_free(&fb);
+    return eq;
+}
+
+// ---- UTF-8 wrappers (which: 0 lower, 1 upper) ----
+
+fn _map_u8(src as *u8, n as i64, which as i32, locale as i64, out as *buf.ByteBuf) as i64 {
+    let is buf.CpBuf as inb = buf.cpbuf_new(64);
+    if (utf8.to_cps(src, n, &inb) < 0) { buf.cpbuf_free(&inb); return 0 - errno.UERR_INVALID; }
+    let is buf.CpBuf as outb = buf.cpbuf_new(64);
+    if (which == 0) { to_lower(inb.ptr, inb.len, locale, &outb); }
+    else            { to_upper(inb.ptr, inb.len, locale, &outb); }
+    let is i64 as br = utf8.from_cps(outb.ptr, outb.len, out);
+    buf.cpbuf_free(&inb);
+    buf.cpbuf_free(&outb);
+    return br;
+}
+
+fn to_lower_u8(src as *u8, n as i64, locale as i64, out as *buf.ByteBuf) as i64 { return _map_u8(src, n, 0, locale, out); }
+fn to_upper_u8(src as *u8, n as i64, locale as i64, out as *buf.ByteBuf) as i64 { return _map_u8(src, n, 1, locale, out); }

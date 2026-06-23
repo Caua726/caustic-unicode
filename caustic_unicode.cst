@@ -17,6 +17,7 @@ use "ucd/ucd.cst"    as ucd;
 use "utf/utf.cst"    as utf;
 use "width/width.cst" as width;
 use "normalize/normalize.cst" as normalize;
+use "case/case.cst"  as casemap;
 
 // Library version == the Unicode version it implements.
 fn version() as *u8 {

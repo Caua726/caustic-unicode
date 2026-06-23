@@ -14,6 +14,7 @@ use "tables/gcb.cst"    as gcb;
 use "tables/wb.cst"     as wb;
 use "tables/sb.cst"     as sb;
 use "tables/bidi.cst"   as bidi;
+use "tables/caseprops.cst" as cpr;
 
 // General_Category values — MUST match tools/gen.cst:gc_id().
 let is i64 as GC_CN with imut = 0;    // Unassigned (default)
@@ -88,3 +89,8 @@ fn sentence_break(cp as i32) as i64 { return cast(i64, sb.sb_get(cp)); }
 
 // Bidi_Class id (BIDI_* in ucd/tables/bidi.cst).
 fn bidi_class(cp as i32) as i64 { return cast(i64, bidi.bidi_get(cp)); }
+
+// Case-related binary properties (used by the case module's context rules).
+fn is_cased(cp as i32) as i64          { if ((cpr.caseprops_get(cp) & 1) != 0) { return 1; } return 0; }
+fn is_case_ignorable(cp as i32) as i64 { if ((cpr.caseprops_get(cp) & 2) != 0) { return 1; } return 0; }
+fn is_soft_dotted(cp as i32) as i64    { if ((cpr.caseprops_get(cp) & 4) != 0) { return 1; } return 0; }

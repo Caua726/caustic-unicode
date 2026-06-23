@@ -1,0 +1,95 @@
+// =======================================================
+// tests/test_case.cst — case mapping & folding.
+// There is no single official conformance file for case mapping, so this
+// covers the spec's hard cases: ß->SS, ligatures, Greek final sigma, the
+// Turkish/Azeri/Lithuanian dotted-I tailorings, full folding, titlecasing.
+// Exit 0 = pass; non-zero = the numbered check that failed.
+// =======================================================
+
+use "../case/case.cst"  as cs;
+use "../core/buf.cst"   as buf;
+
+fn eq(o as *buf.CpBuf, e as *i32, en as i64) as i32 {
+    if (o.len != en) { return 0; }
+    let is i64 as i with mut = 0;
+    while (i < en) { if (o.ptr[i] != e[i]) { return 0; } i = i + 1; }
+    return 1;
+}
+
+fn main() as i32 {
+    let is buf.CpBuf as o = buf.cpbuf_new(16);
+
+    // simple mappings
+    if (cs.to_upper_simple(97) != 65) { return 1; }     // a -> A
+    if (cs.to_lower_simple(65) != 97) { return 2; }     // A -> a
+    if (cs.fold_simple(65) != 97)     { return 3; }
+
+    // ß (U+00DF) -> SS (full upper, unconditional)
+    let is [1]i32 as ss; ss[0] = 223;
+    let is [2]i32 as ss_up; ss_up[0] = 83; ss_up[1] = 83;
+    buf.cpbuf_reset(&o); cs.to_upper(cast(*i32, &ss), 1, cs.LOC_ROOT, &o);
+    if (eq(&o, cast(*i32, &ss_up), 2) == 0) { return 4; }
+
+    // ﬁ ligature (U+FB01) -> FI
+    let is [1]i32 as fi; fi[0] = 64257;
+    let is [2]i32 as fi_up; fi_up[0] = 70; fi_up[1] = 73;
+    buf.cpbuf_reset(&o); cs.to_upper(cast(*i32, &fi), 1, cs.LOC_ROOT, &o);
+    if (eq(&o, cast(*i32, &fi_up), 2) == 0) { return 5; }
+
+    // Greek final sigma: "ΑΣ" -> "ας" (final ς U+03C2)
+    let is [2]i32 as gs; gs[0] = 913; gs[1] = 931;
+    let is [2]i32 as gs_lo; gs_lo[0] = 945; gs_lo[1] = 962;
+    buf.cpbuf_reset(&o); cs.to_lower(cast(*i32, &gs), 2, cs.LOC_ROOT, &o);
+    if (eq(&o, cast(*i32, &gs_lo), 2) == 0) { return 6; }
+    // "ΣΑ" -> "σα" (non-final σ U+03C3)
+    let is [2]i32 as gs2; gs2[0] = 931; gs2[1] = 913;
+    let is [2]i32 as gs2_lo; gs2_lo[0] = 963; gs2_lo[1] = 945;
+    buf.cpbuf_reset(&o); cs.to_lower(cast(*i32, &gs2), 2, cs.LOC_ROOT, &o);
+    if (eq(&o, cast(*i32, &gs2_lo), 2) == 0) { return 7; }
+
+    // Turkish: upper(i)=İ, lower(I)=ı, lower(İ)=i
+    let is [1]i32 as li; li[0] = 105;
+    let is [1]i32 as Idot; Idot[0] = 304;
+    buf.cpbuf_reset(&o); cs.to_upper(cast(*i32, &li), 1, cs.LOC_TR, &o);
+    if (eq(&o, cast(*i32, &Idot), 1) == 0) { return 8; }
+    let is [1]i32 as cI; cI[0] = 73;
+    let is [1]i32 as dotless; dotless[0] = 305;
+    buf.cpbuf_reset(&o); cs.to_lower(cast(*i32, &cI), 1, cs.LOC_TR, &o);
+    if (eq(&o, cast(*i32, &dotless), 1) == 0) { return 9; }
+    buf.cpbuf_reset(&o); cs.to_lower(cast(*i32, &Idot), 1, cs.LOC_TR, &o);
+    if (eq(&o, cast(*i32, &li), 1) == 0) { return 10; }
+    // Root: lower(İ) = i + combining dot above (0069 0307)
+    let is [2]i32 as Idot_root; Idot_root[0] = 105; Idot_root[1] = 775;
+    buf.cpbuf_reset(&o); cs.to_lower(cast(*i32, &Idot), 1, cs.LOC_ROOT, &o);
+    if (eq(&o, cast(*i32, &Idot_root), 2) == 0) { return 11; }
+
+    // full folding: ﬁ -> fi, ß -> ss
+    let is [2]i32 as fi_f; fi_f[0] = 102; fi_f[1] = 105;
+    buf.cpbuf_reset(&o); cs.fold_full(cast(*i32, &fi), 1, &o);
+    if (eq(&o, cast(*i32, &fi_f), 2) == 0) { return 12; }
+    let is [2]i32 as ss_f; ss_f[0] = 115; ss_f[1] = 115;
+    buf.cpbuf_reset(&o); cs.fold_full(cast(*i32, &ss), 1, &o);
+    if (eq(&o, cast(*i32, &ss_f), 2) == 0) { return 13; }
+
+    // titlecasing: "hello world" -> "Hello World"
+    let is [11]i32 as hw;
+    hw[0]=104; hw[1]=101; hw[2]=108; hw[3]=108; hw[4]=111; hw[5]=32;
+    hw[6]=119; hw[7]=111; hw[8]=114; hw[9]=108; hw[10]=100;
+    let is [11]i32 as hw_t;
+    hw_t[0]=72; hw_t[1]=101; hw_t[2]=108; hw_t[3]=108; hw_t[4]=111; hw_t[5]=32;
+    hw_t[6]=87; hw_t[7]=111; hw_t[8]=114; hw_t[9]=108; hw_t[10]=100;
+    buf.cpbuf_reset(&o); cs.to_title(cast(*i32, &hw), 11, cs.LOC_ROOT, &o);
+    if (eq(&o, cast(*i32, &hw_t), 11) == 0) { return 14; }
+
+    // caseless match: Σ vs ς, "MA" vs "ma"
+    let is [1]i32 as cap_sig; cap_sig[0] = 931;
+    let is [1]i32 as fin_sig; fin_sig[0] = 962;
+    if (cs.eq_fold(cast(*i32, &cap_sig), 1, cast(*i32, &fin_sig), 1) != 1) { return 15; }
+    let is [2]i32 as ma_up; ma_up[0] = 77; ma_up[1] = 65;
+    let is [2]i32 as ma_lo; ma_lo[0] = 109; ma_lo[1] = 97;
+    if (cs.eq_fold(cast(*i32, &ma_up), 2, cast(*i32, &ma_lo), 2) != 1) { return 16; }
+    if (cs.eq_fold(cast(*i32, &ma_up), 2, cast(*i32, &fin_sig), 1) != 0) { return 17; }
+
+    buf.cpbuf_free(&o);
+    return 0;
+}

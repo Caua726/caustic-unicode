@@ -921,6 +921,330 @@ fn gen_compose() as i32 {
     return 0;
 }
 
+// Build a trie from `flat` and emit it into an already-open writer (header
+// and any extra blobs are the caller's responsibility). Lets one .cst file
+// hold a trie plus side tables (decomposition, case, fold, ...).
+fn write_trie(w as *io.Writer, name as *u8, flat as *u16, def as i32) as void {
+    let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
+    let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is i32 as dc = build_trie(flat, def, index, data);
+    let is i32 as nidx = emit_u16_blob(w, name, "_index", index, NBLOCKS);
+    let is i32 as ndat = emit_u16_blob(w, name, "_data", data, dc);
+    emit_tail(w, name, nidx, ndat, U_MAXCP, def);
+}
+
+// ---- case properties (Cased, Case_Ignorable, Soft_Dotted as a bitset) ----
+
+// OR `bit` into flat[range] for every "RANGE ; propname" line in p[0..len).
+fn mark_prop(p as *u8, len as i32, propname as *u8, bit as i32, flat as *u16) as void {
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0 && p[pos] != 35) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as semi = find_char(lp, 0, llen, 59);
+            if (semi >= 0) {
+                let is i32 as vs with mut = semi + 1;
+                let is i32 as ve with mut = llen;
+                let is i32 as hh = find_char(lp, vs, llen, 35);
+                if (hh >= 0) { ve = hh; }
+                let is i32 as semi2 = find_char(lp, vs, ve, 59);
+                if (semi2 >= 0) { ve = semi2; }
+                while (vs < ve && (lp[vs] == 32 || lp[vs] == 9)) { vs = vs + 1; }
+                while (ve > vs && (lp[ve - 1] == 32 || lp[ve - 1] == 9 || lp[ve - 1] == 13)) { ve = ve - 1; }
+                if (slice_eq(lp, vs, ve, propname) == 1) {
+                    let is i32 as lo with mut = 0;
+                    let is i32 as hi with mut = 0;
+                    parse_range(lp, 0, semi, &lo, &hi);
+                    if (lo >= 0 && hi >= lo && hi < NUMCP) {
+                        let is i32 as c with mut = lo;
+                        while (c <= hi) { flat[c] = flat[c] | cast(u16, bit); c = c + 1; }
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+}
+
+fn gen_caseprops() as i32 {
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as l1 with mut = 0;
+    let is *u8 as p1 = slurp("tools/ucd/DerivedCoreProperties.txt", &l1);
+    if (cast(i64, p1) == 0) { return cast(i32, 0 - 1); }
+    mark_prop(p1, l1, "Cased", 1, flat);
+    mark_prop(p1, l1, "Case_Ignorable", 2, flat);
+    let is i32 as l2 with mut = 0;
+    let is *u8 as p2 = slurp("tools/ucd/PropList.txt", &l2);
+    if (cast(i64, p2) == 0) { return cast(i32, 0 - 1); }
+    mark_prop(p2, l2, "Soft_Dotted", 4, flat);
+    io.write_str(1, "caseprops:");
+    return build_and_emit("ucd/tables/caseprops.cst", "caseprops", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+}
+
+// ---- simple case mapping (UnicodeData fields 12/13/14) ----
+// trie cp -> idx (0 = identity); vals[idx*3 + 0|1|2] = lower|upper|title.
+fn gen_case_simple() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/UnicodeData.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is *u32 as vals = cast(*u32, mem.core.mmap_anon(cast(i64, 12000) * 4));
+    if (cast(i64, flat) == 0 || cast(i64, vals) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as count with mut = 1;            // idx 0 = identity
+    vals[0] = cast(u32, 0); vals[1] = cast(u32, 0); vals[2] = cast(u32, 0);
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as fue with mut = 0;
+            let is i32 as fus = field(lp, llen, 12, &fue);   // uppercase
+            let is i32 as fle with mut = 0;
+            let is i32 as fls = field(lp, llen, 13, &fle);   // lowercase
+            let is i32 as fte with mut = 0;
+            let is i32 as fts = field(lp, llen, 14, &fte);   // titlecase
+            if (f0s >= 0 && fus >= 0 && fls >= 0 && fts >= 0) {
+                if (fue > fus || fle > fls || fte > fts) {
+                    let is i32 as cp = parse_hex(lp, f0s, f0e);
+                    let is i32 as up with mut = cp;
+                    let is i32 as lo with mut = cp;
+                    let is i32 as ti with mut = cp;
+                    if (fue > fus) { up = parse_hex(lp, fus, fue); }
+                    if (fle > fls) { lo = parse_hex(lp, fls, fle); }
+                    if (fte > fts) { ti = parse_hex(lp, fts, fte); }
+                    if (cp >= 0 && cp < NUMCP) {
+                        vals[count * 3 + 0] = cast(u32, lo);
+                        vals[count * 3 + 1] = cast(u32, up);
+                        vals[count * 3 + 2] = cast(u32, ti);
+                        flat[cp] = cast(u16, count);
+                        count = count + 1;
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    let is i64 as fd = io._open_write("ucd/tables/simplecase.cst");
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst from UnicodeData.txt (Unicode 16.0). DO NOT EDIT.\n");
+    ws(&w, "// trie cp -> idx (0=identity); v[idx*3+0|1|2] = simple lower|upper|title.\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    write_trie(&w, "simplecase", flat, 0);
+    emit_flat_u32(&w, "simplecase_v", vals, count * 3);
+    io.flush(&w);
+    io._close_fd(fd);
+    io.write_str(1, "simplecase:  entries="); io.write_int(1, cast(i64, count)); io.write_str(1, "\n");
+    return 0;
+}
+
+// ---- case folding (CaseFolding.txt) ----
+// simple fold (status C/S): trie cp -> idx, v[idx] = folded cp.
+// full fold   (status C/F): trie cp -> midx, meta off|len, pool of cps.
+fn gen_fold() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/CaseFolding.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is *u16 as sflat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is *u32 as sval  = cast(*u32, mem.core.mmap_anon(cast(i64, 2000) * 4));
+    let is *u16 as fflat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is *u32 as fmeta = cast(*u32, mem.core.mmap_anon(cast(i64, 2000) * 4));
+    let is *u32 as fpool = cast(*u32, mem.core.mmap_anon(cast(i64, 4000) * 4));
+    if (cast(i64, sflat) == 0 || cast(i64, fflat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as scount with mut = 1;
+    sval[0] = cast(u32, 0);
+    let is i32 as mcount with mut = 1;
+    fmeta[0] = cast(u32, 0);
+    let is i32 as pcount with mut = 0;
+
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0 && p[pos] != 35) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as f1e with mut = 0;
+            let is i32 as f1s = field(lp, llen, 1, &f1e);
+            let is i32 as f2e with mut = 0;
+            let is i32 as f2s = field(lp, llen, 2, &f2e);
+            if (f0s >= 0 && f1s >= 0 && f2s >= 0) {
+                let is i32 as st with mut = f1s;
+                while (st < f1e && (lp[st] == 32 || lp[st] == 9)) { st = st + 1; }
+                let is u8 as status = lp[st];
+                let is i32 as cp = parse_hex(lp, f0s, f0e);
+                if (cp >= 0 && cp < NUMCP) {
+                    if (status == 67 || status == 83) {        // 'C' or 'S' -> simple
+                        let is i32 as q with mut = f2s;
+                        while (q < f2e && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                        let is i32 as ts = q;
+                        while (q < f2e && lp[q] != 32 && lp[q] != 9) { q = q + 1; }
+                        sval[scount] = cast(u32, parse_hex(lp, ts, q));
+                        sflat[cp] = cast(u16, scount);
+                        scount = scount + 1;
+                    }
+                    if (status == 67 || status == 70) {        // 'C' or 'F' -> full
+                        let is i32 as off = pcount;
+                        let is i32 as q with mut = f2s;
+                        let is i32 as flen with mut = 0;
+                        while (q < f2e) {
+                            while (q < f2e && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                            let is i32 as ts = q;
+                            while (q < f2e && lp[q] != 32 && lp[q] != 9) { q = q + 1; }
+                            if (q > ts) { fpool[pcount] = cast(u32, parse_hex(lp, ts, q)); pcount = pcount + 1; flen = flen + 1; }
+                        }
+                        fmeta[mcount] = cast(u32, off) | (cast(u32, flen) << 20);
+                        fflat[cp] = cast(u16, mcount);
+                        mcount = mcount + 1;
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    let is i64 as fd = io._open_write("ucd/tables/fold.cst");
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst from CaseFolding.txt (Unicode 16.0). DO NOT EDIT.\n");
+    ws(&w, "// foldsimple: trie cp->idx, v[idx]=folded cp. foldfull: trie cp->midx, meta off|len<<20, pool.\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    write_trie(&w, "foldsimple", sflat, 0);
+    emit_flat_u32(&w, "foldsimple_v", sval, scount);
+    write_trie(&w, "foldfull", fflat, 0);
+    emit_flat_u32(&w, "foldfull_meta", fmeta, mcount);
+    emit_flat_u32(&w, "foldfull_pool", fpool, pcount);
+    io.flush(&w);
+    io._close_fd(fd);
+    io.write_str(1, "fold:  simple="); io.write_int(1, cast(i64, scount));
+    io.write_str(1, " full="); io.write_int(1, cast(i64, mcount)); io.write_str(1, "\n");
+    return 0;
+}
+
+// ---- special casing (SpecialCasing.txt) ----
+// Condition code: 0 unconditional, 1 Final_Sigma, 2 lt, 3 lt More_Above,
+// 4 lt After_Soft_Dotted, 5 tr, 6 tr Not_Before_Dot, 7 tr After_I,
+// 8 az, 9 az Not_Before_Dot, 10 az After_I.
+fn parse_condition(p as *u8, s as i32, e as i32) as i32 {
+    let is i32 as vs with mut = s;
+    let is i32 as ve with mut = e;
+    while (vs < ve && (p[vs] == 32 || p[vs] == 9)) { vs = vs + 1; }
+    while (ve > vs && (p[ve - 1] == 32 || p[ve - 1] == 9 || p[ve - 1] == 13)) { ve = ve - 1; }
+    if (vs >= ve) { return 0; }
+    if (p[vs] == 35) { return 0; }                          // comment -> unconditional
+    if (slice_eq(p, vs, ve, "Final_Sigma") == 1) { return 1; }
+    if (slice_eq(p, vs, ve, "lt") == 1) { return 2; }
+    if (slice_eq(p, vs, ve, "lt More_Above") == 1) { return 3; }
+    if (slice_eq(p, vs, ve, "lt After_Soft_Dotted") == 1) { return 4; }
+    if (slice_eq(p, vs, ve, "tr") == 1) { return 5; }
+    if (slice_eq(p, vs, ve, "tr Not_Before_Dot") == 1) { return 6; }
+    if (slice_eq(p, vs, ve, "tr After_I") == 1) { return 7; }
+    if (slice_eq(p, vs, ve, "az") == 1) { return 8; }
+    if (slice_eq(p, vs, ve, "az Not_Before_Dot") == 1) { return 9; }
+    if (slice_eq(p, vs, ve, "az After_I") == 1) { return 10; }
+    return cast(i32, 0 - 1);                                 // unknown -> skip
+}
+
+fn _tok_count(p as *u8, s as i32, e as i32, pool as *u32, pc as *i32) as i32 {
+    let is i32 as q with mut = s;
+    let is i32 as cnt with mut = 0;
+    while (q < e) {
+        while (q < e && (p[q] == 32 || p[q] == 9)) { q = q + 1; }
+        let is i32 as ts = q;
+        while (q < e && p[q] != 32 && p[q] != 9) { q = q + 1; }
+        if (q > ts) {
+            if (p[ts] == 35) { return cnt; }
+            pool[pc[0]] = cast(u32, parse_hex(p, ts, q));
+            pc[0] = pc[0] + 1;
+            cnt = cnt + 1;
+        }
+    }
+    return cnt;
+}
+
+fn gen_special() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/SpecialCasing.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is *u32 as ecp  = cast(*u32, mem.core.mmap_anon(cast(i64, 256) * 4));
+    let is *u32 as ehdr = cast(*u32, mem.core.mmap_anon(cast(i64, 256) * 4));
+    let is *u32 as eoff = cast(*u32, mem.core.mmap_anon(cast(i64, 256) * 4));
+    let is *u32 as pool = cast(*u32, mem.core.mmap_anon(cast(i64, 2000) * 4));
+    let is *i64 as keys = cast(*i64, mem.core.mmap_anon(cast(i64, 256) * 8));
+    let is i32 as ec with mut = 0;
+    let is i32 as pc with mut = 0;
+
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0 && p[pos] != 35) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f0e with mut = 0;
+            let is i32 as f0s = field(lp, llen, 0, &f0e);
+            let is i32 as f1e with mut = 0;
+            let is i32 as f1s = field(lp, llen, 1, &f1e);
+            let is i32 as f2e with mut = 0;
+            let is i32 as f2s = field(lp, llen, 2, &f2e);
+            let is i32 as f3e with mut = 0;
+            let is i32 as f3s = field(lp, llen, 3, &f3e);
+            let is i32 as f4e with mut = 0;
+            let is i32 as f4s = field(lp, llen, 4, &f4e);
+            if (f0s >= 0 && f1s >= 0 && f2s >= 0 && f3s >= 0 && f4s >= 0) {
+                let is i32 as cond = parse_condition(lp, f4s, f4e);
+                if (cond >= 0) {
+                    let is i32 as cp = parse_hex(lp, f0s, f0e);
+                    let is i32 as base = pc;
+                    let is i32 as lo_len = _tok_count(lp, f1s, f1e, pool, &pc);
+                    let is i32 as ti_len = _tok_count(lp, f2s, f2e, pool, &pc);
+                    let is i32 as up_len = _tok_count(lp, f3s, f3e, pool, &pc);
+                    ecp[ec] = cast(u32, cp);
+                    ehdr[ec] = cast(u32, lo_len) | (cast(u32, ti_len) << 4) | (cast(u32, up_len) << 8) | (cast(u32, cond) << 12);
+                    eoff[ec] = cast(u32, base);
+                    keys[ec] = (cast(i64, cp) << 20) | cast(i64, ec);
+                    ec = ec + 1;
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    qsort_i64(keys, 0, ec - 1);
+    let is *u32 as scp  = cast(*u32, mem.core.mmap_anon(cast(i64, 256) * 4));
+    let is *u32 as shdr = cast(*u32, mem.core.mmap_anon(cast(i64, 256) * 4));
+    let is *u32 as soff = cast(*u32, mem.core.mmap_anon(cast(i64, 256) * 4));
+    let is i32 as i with mut = 0;
+    while (i < ec) {
+        let is i32 as src = cast(i32, keys[i] & 1048575);
+        scp[i] = ecp[src]; shdr[i] = ehdr[src]; soff[i] = eoff[src];
+        i = i + 1;
+    }
+    let is i64 as fd = io._open_write("ucd/tables/special.cst");
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst from SpecialCasing.txt (Unicode 16.0). DO NOT EDIT.\n");
+    ws(&w, "// entries sorted by cp. hdr: lo_len(0..3) ti_len(4..7) up_len(8..11) cond(12..15).\n");
+    ws(&w, "// pool layout per entry at off: [lower][title][upper].\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    emit_flat_u32(&w, "sc_cp", scp, ec);
+    emit_flat_u32(&w, "sc_hdr", shdr, ec);
+    emit_flat_u32(&w, "sc_off", soff, ec);
+    emit_flat_u32(&w, "sc_pool", pool, pc);
+    ws(&w, "let is i32 as sc_count with imut = "); wi(&w, ec); ws(&w, ";\n");
+    io.flush(&w);
+    io._close_fd(fd);
+    io.write_str(1, "special:  entries="); io.write_int(1, cast(i64, ec)); io.write_str(1, "\n");
+    return 0;
+}
+
 fn main() as i32 {
     if (gen_gc() < 0)  { return 1; }
     if (gen_ccc() < 0) { return 2; }
@@ -933,6 +1257,10 @@ fn main() as i32 {
     if (gen_bidi() < 0) { return 9; }
     if (gen_decomp() < 0) { return 10; }
     if (gen_compose() < 0) { return 11; }
+    if (gen_caseprops() < 0) { return 12; }
+    if (gen_case_simple() < 0) { return 13; }
+    if (gen_fold() < 0) { return 14; }
+    if (gen_special() < 0) { return 15; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }
