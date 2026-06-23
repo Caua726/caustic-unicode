@@ -1,0 +1,536 @@
+// =======================================================
+// caustic-unicode/bidi/bidi.cst
+// Unicode Bidirectional Algorithm (UAX #9): paragraph level, explicit
+// levels & directions with isolates (X1-X8), the X9 removals, isolating
+// run sequences (BD13) with weak (W1-W7), neutral incl. brackets
+// (N0-N2) and implicit (I1-I2) rules, then L1 level reset. reorder (L2)
+// produces the visual order. mirror() exposes the L4 mirror mapping.
+// =======================================================
+
+use "../core/errno.cst"          as errno;
+use "../core/buf.cst"            as buf;
+use "../ucd/tables/bidi.cst"     as bc;
+use "../ucd/tables/brackets.cst" as bk;
+use "../ucd/tables/mirror.cst"   as mr;
+
+let is i64 as MAX_DEPTH with imut = 125;
+
+// reusable per-cp scratch (types, matching-PDI, run-sequence positions, removed flags)
+let is buf.CpBuf  as _t  with mut;
+let is buf.CpBuf  as _mp with mut;
+let is buf.CpBuf  as _sq with mut;
+let is buf.CpBuf  as _sp2 with mut;       // current sequence's filtered positions
+let is buf.CpBuf  as _el with mut;        // stable embedding levels (I1 reads this)
+let is buf.ByteBuf as _rm with mut;
+let is i32 as _ready with mut = 0;
+
+fn _ensure(n as i64) as void {
+    if (_ready == 0) {
+        _t = buf.cpbuf_new(64); _mp = buf.cpbuf_new(64);
+        _sq = buf.cpbuf_new(64); _sp2 = buf.cpbuf_new(64); _el = buf.cpbuf_new(64); _rm = buf.bytebuf_new(64);
+        _ready = 1;
+    }
+    buf.cpbuf_reserve(&_t, n);  _t.len = n;
+    buf.cpbuf_reserve(&_mp, n); _mp.len = n;
+    buf.cpbuf_reserve(&_sq, n); _sq.len = n;
+    buf.cpbuf_reserve(&_sp2, n); _sp2.len = n;
+    buf.cpbuf_reserve(&_el, n); _el.len = n;
+    buf.bytebuf_reserve(&_rm, n); _rm.len = n;
+}
+
+fn _is_isolate_init(t as i64) as i64 {
+    if (t == bc.BIDI_LRI || t == bc.BIDI_RLI || t == bc.BIDI_FSI) { return 1; }
+    return 0;
+}
+// Neutral-or-isolate (NI) per UAX #9.
+fn _is_ni(t as i64) as i64 {
+    if (t == bc.BIDI_B || t == bc.BIDI_S || t == bc.BIDI_WS || t == bc.BIDI_ON
+        || t == bc.BIDI_FSI || t == bc.BIDI_LRI || t == bc.BIDI_RLI || t == bc.BIDI_PDI) { return 1; }
+    return 0;
+}
+fn _next_odd(l as i64) as i64 { return (l + 1) | 1; }
+fn _next_even(l as i64) as i64 { return (l + 2) & (0 - 2); }
+
+// Mirror mapping (L4): mirrored code point, or cp itself. Binary search.
+fn mirror(cp as i32) as i32 {
+    let is i32 as lo with mut = 0;
+    let is i32 as hi with mut = mr.mr_count - 1;
+    while (lo <= hi) {
+        let is i32 as mid = (lo + hi) / 2;
+        let is i32 as v = mr.mr_cp_at(mid);
+        if (v < cp) { lo = mid + 1; }
+        else if (v > cp) { hi = mid - 1; }
+        else { return mr.mr_to_at(mid); }
+    }
+    return cp;
+}
+
+// Bracket lookup: returns index in bk table or -1.
+fn _bracket(cp as i32) as i32 {
+    let is i32 as lo with mut = 0;
+    let is i32 as hi with mut = bk.bk_count - 1;
+    while (lo <= hi) {
+        let is i32 as mid = (lo + hi) / 2;
+        let is i32 as v = bk.bk_cp_at(mid);
+        if (v < cp) { lo = mid + 1; }
+        else if (v > cp) { hi = mid - 1; }
+        else { return mid; }
+    }
+    return cast(i32, 0 - 1);
+}
+// Canonical bracket cp (N0 uses canonical equivalence: 2329/232A ~ 3008/3009).
+fn _canon_bracket(cp as i32) as i32 {
+    if (cp == 12296) { return 9001; }   // 3008 -> 2329
+    if (cp == 12297) { return 9002; }   // 3009 -> 232A
+    return cp;
+}
+
+// Paragraph level over [lo,hi): first L (->0) or R/AL (->1), skipping isolates.
+fn _para_level(lo as i64, hi as i64) as i64 {
+    let is i64 as i with mut = lo;
+    while (i < hi) {
+        let is i64 as t = cast(i64, _t.ptr[i]);
+        if (t == bc.BIDI_L) { return 0; }
+        if (t == bc.BIDI_R || t == bc.BIDI_AL) { return 1; }
+        if (_is_isolate_init(t) == 1) { i = cast(i64, _mp.ptr[i]); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Resolve embedding levels into lev[]. base: 0 LTR, 1 RTL, 2 auto.
+// Returns paragraph level, or 0 - UERR_* on bad args.
+fn resolve_levels(cps as *i32, n as i64, base as i64, lev as *u8) as i64 {
+    if (n < 0) { return 0 - errno.UERR_INVALID; }
+    if (n == 0) { return 0; }
+    _ensure(n);
+
+    // initial types + matching PDI (BD9)
+    let is [130]i64 as istk;          // isolate-initiator index stack
+    let is i64 as isp with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        _t.ptr[i] = cast(i32, bc.bidi_get(cps[i]));
+        _mp.ptr[i] = cast(i32, n);
+        _rm.ptr[i] = cast(u8, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        let is i64 as t = cast(i64, _t.ptr[i]);
+        if (_is_isolate_init(t) == 1) {
+            if (isp < 130) { istk[isp] = i; isp = isp + 1; }
+        } else {
+            if (t == bc.BIDI_PDI && isp > 0) { isp = isp - 1; _mp.ptr[istk[isp]] = cast(i32, i); }
+        }
+        i = i + 1;
+    }
+
+    let is i64 as para with mut = base;
+    if (base == 2) { para = _para_level(0, n); }
+
+    // X1-X8: directional status stack
+    let is [130]i64 as slev;
+    let is [130]i64 as sovr;          // 0 neutral, else BIDI_L / BIDI_R
+    let is [130]i64 as siso;          // 1 if isolate entry
+    let is i64 as sp with mut = 0;
+    slev[0] = para; sovr[0] = 0 - 1; siso[0] = 0;
+    let is i64 as ovf_iso with mut = 0;
+    let is i64 as ovf_emb with mut = 0;
+    let is i64 as valid_iso with mut = 0;
+
+    i = 0;
+    while (i < n) {
+        let is i64 as t = cast(i64, _t.ptr[i]);
+        if (t == bc.BIDI_RLE || t == bc.BIDI_LRE || t == bc.BIDI_RLO || t == bc.BIDI_LRO) {
+            lev[i] = cast(u8, slev[sp]);
+            _rm.ptr[i] = cast(u8, 1);
+            let is i64 as nl with mut = _next_even(slev[sp]);
+            if (t == bc.BIDI_RLE || t == bc.BIDI_RLO) { nl = _next_odd(slev[sp]); }
+            if (nl <= MAX_DEPTH && ovf_iso == 0 && ovf_emb == 0) {
+                sp = sp + 1; slev[sp] = nl; siso[sp] = 0;
+                if (t == bc.BIDI_RLO) { sovr[sp] = bc.BIDI_R; }
+                else if (t == bc.BIDI_LRO) { sovr[sp] = bc.BIDI_L; }
+                else { sovr[sp] = 0 - 1; }
+            } else {
+                if (ovf_iso == 0) { ovf_emb = ovf_emb + 1; }
+            }
+        } else if (_is_isolate_init(t) == 1) {
+            let is i64 as dir with mut = t;
+            if (t == bc.BIDI_FSI) {
+                let is i64 as d = _para_level(i + 1, cast(i64, _mp.ptr[i]));
+                if (d == 1) { dir = bc.BIDI_RLI; } else { dir = bc.BIDI_LRI; }
+            }
+            lev[i] = cast(u8, slev[sp]);
+            if (sovr[sp] >= 0) { _t.ptr[i] = cast(i32, sovr[sp]); }
+            let is i64 as nl with mut = _next_even(slev[sp]);
+            if (dir == bc.BIDI_RLI) { nl = _next_odd(slev[sp]); }
+            if (nl <= MAX_DEPTH && ovf_iso == 0 && ovf_emb == 0) {
+                valid_iso = valid_iso + 1;
+                sp = sp + 1; slev[sp] = nl; sovr[sp] = 0 - 1; siso[sp] = 1;
+            } else {
+                ovf_iso = ovf_iso + 1;
+            }
+        } else if (t == bc.BIDI_PDI) {
+            if (ovf_iso > 0) { ovf_iso = ovf_iso - 1; }
+            else if (valid_iso == 0) { }
+            else {
+                ovf_emb = 0;
+                while (siso[sp] == 0) { sp = sp - 1; }
+                sp = sp - 1;
+                valid_iso = valid_iso - 1;
+            }
+            lev[i] = cast(u8, slev[sp]);
+            if (sovr[sp] >= 0) { _t.ptr[i] = cast(i32, sovr[sp]); }
+        } else if (t == bc.BIDI_PDF) {
+            _rm.ptr[i] = cast(u8, 1);
+            if (ovf_iso > 0) { }
+            else if (ovf_emb > 0) { ovf_emb = ovf_emb - 1; }
+            else if (siso[sp] == 0 && sp >= 1) { sp = sp - 1; }
+            lev[i] = cast(u8, slev[sp]);
+        } else if (t == bc.BIDI_B) {
+            sp = 0; ovf_iso = 0; ovf_emb = 0; valid_iso = 0;
+            lev[i] = cast(u8, para);
+        } else if (t == bc.BIDI_BN) {
+            _rm.ptr[i] = cast(u8, 1);
+            lev[i] = cast(u8, slev[sp]);
+        } else {
+            lev[i] = cast(u8, slev[sp]);
+            if (sovr[sp] >= 0) { _t.ptr[i] = cast(i32, sovr[sp]); }
+        }
+        i = i + 1;
+    }
+
+    // Snapshot embedding levels (I1 will mutate lev[]; run detection & sos/eos
+    // must read these stable levels).
+    i = 0;
+    while (i < n) { _el.ptr[i] = cast(i32, lev[i]); i = i + 1; }
+
+    // Build the X9-filtered order (non-removed positions) in _sq, length m.
+    let is i64 as m with mut = 0;
+    i = 0;
+    while (i < n) {
+        if (_rm.ptr[i] == 0) { _sq.ptr[m] = cast(i32, i); m = m + 1; }
+        i = i + 1;
+    }
+
+    // Process each isolating run sequence (BD13) over the filtered order.
+    _process_sequences(cps, n, m, para, lev);
+
+    // L1: reset separators and trailing whitespace/isolates to the paragraph level.
+    i = 0;
+    let is i64 as run_start with mut = 0 - 1;
+    while (i < n) {
+        let is i64 as ot = cast(i64, bc.bidi_get(cps[i]));   // original type
+        if (ot == bc.BIDI_B || ot == bc.BIDI_S) {
+            lev[i] = cast(u8, para);
+            run_start = 0 - 1;
+        } else if (ot == bc.BIDI_WS || _is_isolate_init(ot) == 1 || ot == bc.BIDI_PDI
+                   || ot == bc.BIDI_RLE || ot == bc.BIDI_LRE || ot == bc.BIDI_RLO || ot == bc.BIDI_LRO
+                   || ot == bc.BIDI_PDF || ot == bc.BIDI_BN) {
+            if (run_start < 0) { run_start = i; }
+        } else {
+            run_start = 0 - 1;
+        }
+        i = i + 1;
+    }
+    if (run_start >= 0) {
+        i = run_start;
+        while (i < n) { lev[i] = cast(u8, para); i = i + 1; }
+    }
+
+    return para;
+}
+
+// filtered index of original position `orig` (binary search _sq).
+fn _find_filtered(orig as i64, m as i64) as i64 {
+    let is i64 as lo with mut = 0;
+    let is i64 as hi with mut = m - 1;
+    while (lo <= hi) {
+        let is i64 as mid = (lo + hi) / 2;
+        let is i64 as v = cast(i64, _sq.ptr[mid]);
+        if (v < orig) { lo = mid + 1; }
+        else if (v > orig) { hi = mid - 1; }
+        else { return mid; }
+    }
+    return 0 - 1;
+}
+
+// N0/N1 strong direction: L -> L; R/EN/AN -> R; else -1.
+fn _dir(t as i64) as i64 {
+    if (t == bc.BIDI_L) { return bc.BIDI_L; }
+    if (t == bc.BIDI_R || t == bc.BIDI_EN || t == bc.BIDI_AN) { return bc.BIDI_R; }
+    return 0 - 1;
+}
+
+fn _rev(vis as *i64, a as i64, b as i64) as void {
+    let is i64 as i with mut = a;
+    let is i64 as j with mut = b;
+    while (i < j) {
+        let is i64 as tmp = vis[i]; vis[i] = vis[j]; vis[j] = tmp;
+        i = i + 1; j = j - 1;
+    }
+}
+
+// Apply W1-W7, N0-N2, I1-I2 to one isolating run sequence (positions pos[0..L)).
+fn _apply_rules(cps as *i32, pos as *i32, L as i64, sos as i64, eos as i64, seqlev as i64, lev as *u8) as void {
+    let is i64 as edir with mut = bc.BIDI_L;
+    if ((seqlev & 1) == 1) { edir = bc.BIDI_R; }
+    let is i64 as odir with mut = bc.BIDI_L;
+    if (edir == bc.BIDI_L) { odir = bc.BIDI_R; }
+
+    // W1: NSM -> previous type (or sos; isolate/PDI -> ON)
+    let is i64 as j with mut = 0;
+    while (j < L) {
+        if (cast(i64, _t.ptr[pos[j]]) == bc.BIDI_NSM) {
+            let is i64 as p with mut = sos;
+            if (j > 0) { p = cast(i64, _t.ptr[pos[j - 1]]); }
+            if (_is_isolate_init(p) == 1 || p == bc.BIDI_PDI) { p = bc.BIDI_ON; }
+            _t.ptr[pos[j]] = cast(i32, p);
+        }
+        j = j + 1;
+    }
+    // W2: EN -> AN if last strong is AL
+    let is i64 as strong with mut = sos;
+    j = 0;
+    while (j < L) {
+        let is i64 as t = cast(i64, _t.ptr[pos[j]]);
+        if (t == bc.BIDI_R || t == bc.BIDI_L || t == bc.BIDI_AL) { strong = t; }
+        else if (t == bc.BIDI_EN && strong == bc.BIDI_AL) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_AN); }
+        j = j + 1;
+    }
+    // W3: AL -> R
+    j = 0;
+    while (j < L) { if (cast(i64, _t.ptr[pos[j]]) == bc.BIDI_AL) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_R); } j = j + 1; }
+    // W4: ES between EN EN -> EN; CS between EN EN / AN AN
+    j = 1;
+    while (j + 1 < L) {
+        let is i64 as t = cast(i64, _t.ptr[pos[j]]);
+        let is i64 as pr = cast(i64, _t.ptr[pos[j - 1]]);
+        let is i64 as nx = cast(i64, _t.ptr[pos[j + 1]]);
+        if (t == bc.BIDI_ES && pr == bc.BIDI_EN && nx == bc.BIDI_EN) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_EN); }
+        else if (t == bc.BIDI_CS && pr == bc.BIDI_EN && nx == bc.BIDI_EN) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_EN); }
+        else if (t == bc.BIDI_CS && pr == bc.BIDI_AN && nx == bc.BIDI_AN) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_AN); }
+        j = j + 1;
+    }
+    // W5: ET runs adjacent to EN -> EN
+    j = 0;
+    while (j < L) {
+        if (cast(i64, _t.ptr[pos[j]]) == bc.BIDI_ET) {
+            let is i64 as e with mut = j;
+            while (e < L && cast(i64, _t.ptr[pos[e]]) == bc.BIDI_ET) { e = e + 1; }
+            let is i64 as adj with mut = 0;
+            if (j > 0 && cast(i64, _t.ptr[pos[j - 1]]) == bc.BIDI_EN) { adj = 1; }
+            if (e < L && cast(i64, _t.ptr[pos[e]]) == bc.BIDI_EN) { adj = 1; }
+            if (adj == 1) { let is i64 as q with mut = j; while (q < e) { _t.ptr[pos[q]] = cast(i32, bc.BIDI_EN); q = q + 1; } }
+            j = e;
+        } else { j = j + 1; }
+    }
+    // W6: remaining ES/ET/CS -> ON
+    j = 0;
+    while (j < L) {
+        let is i64 as t = cast(i64, _t.ptr[pos[j]]);
+        if (t == bc.BIDI_ES || t == bc.BIDI_ET || t == bc.BIDI_CS) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_ON); }
+        j = j + 1;
+    }
+    // W7: EN -> L if last strong is L
+    strong = sos;
+    j = 0;
+    while (j < L) {
+        let is i64 as t = cast(i64, _t.ptr[pos[j]]);
+        if (t == bc.BIDI_R || t == bc.BIDI_L) { strong = t; }
+        else if (t == bc.BIDI_EN && strong == bc.BIDI_L) { _t.ptr[pos[j]] = cast(i32, bc.BIDI_L); }
+        j = j + 1;
+    }
+
+    // N0: paired brackets (BD16)
+    let is [64]i64 as openp;
+    let is [64]i64 as closep;
+    let is i64 as np with mut = 0;
+    let is [64]i64 as stk_exp;
+    let is [64]i64 as stk_j;
+    let is i64 as ssp with mut = 0;
+    let is i64 as stop with mut = 0;
+    j = 0;
+    while (j < L && stop == 0) {
+        if (cast(i64, _t.ptr[pos[j]]) == bc.BIDI_ON) {
+            let is i32 as bi = _bracket(cps[pos[j]]);
+            if (bi >= 0) {
+                if (bk.bk_type_at(bi) == 0) {
+                    if (ssp >= 63) { stop = 1; }
+                    else { stk_exp[ssp] = cast(i64, _canon_bracket(bk.bk_pair_at(bi))); stk_j[ssp] = j; ssp = ssp + 1; }
+                } else {
+                    let is i64 as cc = cast(i64, _canon_bracket(cps[pos[j]]));
+                    let is i64 as s with mut = ssp - 1;
+                    while (s >= 0) {
+                        if (stk_exp[s] == cc) {
+                            if (np < 64) { openp[np] = stk_j[s]; closep[np] = j; np = np + 1; }
+                            ssp = s;
+                            s = 0 - 1;
+                        } else { s = s - 1; }
+                    }
+                }
+            }
+        }
+        j = j + 1;
+    }
+    // sort pairs by opening position (insertion sort)
+    let is i64 as a with mut = 1;
+    while (a < np) {
+        let is i64 as ko = openp[a];
+        let is i64 as kc = closep[a];
+        let is i64 as b with mut = a - 1;
+        while (b >= 0 && openp[b] > ko) { openp[b + 1] = openp[b]; closep[b + 1] = closep[b]; b = b - 1; }
+        openp[b + 1] = ko; closep[b + 1] = kc;
+        a = a + 1;
+    }
+    // resolve each pair (N0)
+    let is i64 as pi with mut = 0;
+    while (pi < np) {
+        let is i64 as o = openp[pi];
+        let is i64 as c = closep[pi];
+        let is i64 as foundE with mut = 0;
+        let is i64 as foundO with mut = 0;
+        let is i64 as q with mut = o + 1;
+        while (q < c) {
+            let is i64 as d = _dir(cast(i64, _t.ptr[pos[q]]));
+            if (d == edir) { foundE = 1; }
+            else if (d == odir) { foundO = 1; }
+            q = q + 1;
+        }
+        let is i64 as setd with mut = 0 - 1;
+        if (foundE == 1) { setd = edir; }
+        else if (foundO == 1) {
+            let is i64 as ctx with mut = sos;
+            let is i64 as r with mut = o - 1;
+            while (r >= 0) {
+                let is i64 as d2 = _dir(cast(i64, _t.ptr[pos[r]]));
+                if (d2 >= 0) { ctx = d2; r = 0 - 1; } else { r = r - 1; }
+            }
+            if (ctx == odir) { setd = odir; } else { setd = edir; }
+        }
+        if (setd >= 0) {
+            _t.ptr[pos[o]] = cast(i32, setd);
+            _t.ptr[pos[c]] = cast(i32, setd);
+            let is i64 as q2 with mut = o + 1;
+            while (q2 < L && cast(i64, bc.bidi_get(cps[pos[q2]])) == bc.BIDI_NSM) { _t.ptr[pos[q2]] = cast(i32, setd); q2 = q2 + 1; }
+            q2 = c + 1;
+            while (q2 < L && cast(i64, bc.bidi_get(cps[pos[q2]])) == bc.BIDI_NSM) { _t.ptr[pos[q2]] = cast(i32, setd); q2 = q2 + 1; }
+        }
+        pi = pi + 1;
+    }
+
+    // N1: NI between strong of same direction -> that direction
+    j = 0;
+    while (j < L) {
+        if (_is_ni(cast(i64, _t.ptr[pos[j]])) == 1) {
+            let is i64 as e with mut = j;
+            while (e < L && _is_ni(cast(i64, _t.ptr[pos[e]])) == 1) { e = e + 1; }
+            let is i64 as ld with mut = sos;
+            if (j > 0) { ld = _dir(cast(i64, _t.ptr[pos[j - 1]])); }
+            let is i64 as rd with mut = eos;
+            if (e < L) { rd = _dir(cast(i64, _t.ptr[pos[e]])); }
+            if (ld >= 0 && ld == rd) { let is i64 as q with mut = j; while (q < e) { _t.ptr[pos[q]] = cast(i32, ld); q = q + 1; } }
+            j = e;
+        } else { j = j + 1; }
+    }
+    // N2: remaining NI -> embedding direction
+    j = 0;
+    while (j < L) {
+        if (_is_ni(cast(i64, _t.ptr[pos[j]])) == 1) { _t.ptr[pos[j]] = cast(i32, edir); }
+        j = j + 1;
+    }
+
+    // I1/I2: implicit levels
+    j = 0;
+    while (j < L) {
+        let is i64 as t = cast(i64, _t.ptr[pos[j]]);
+        let is i64 as lv with mut = cast(i64, _el.ptr[pos[j]]);
+        if ((lv & 1) == 0) {
+            if (t == bc.BIDI_R) { lv = lv + 1; }
+            else if (t == bc.BIDI_AN || t == bc.BIDI_EN) { lv = lv + 2; }
+        } else {
+            if (t == bc.BIDI_L || t == bc.BIDI_EN || t == bc.BIDI_AN) { lv = lv + 1; }
+        }
+        lev[pos[j]] = cast(u8, lv);
+        j = j + 1;
+    }
+}
+
+fn _process_sequences(cps as *i32, n as i64, m as i64, para as i64, lev as *u8) as void {
+    let is i64 as k with mut = 0;
+    while (k < m) {
+        let is i64 as oi0 = cast(i64, _sq.ptr[k]);
+        let is i64 as runlev = cast(i64, _el.ptr[oi0]);
+        let is i64 as e0 with mut = k;
+        while (e0 < m && cast(i64, _el.ptr[_sq.ptr[e0]]) == runlev) { e0 = e0 + 1; }
+        let is i64 as ocls0 = cast(i64, bc.bidi_get(cps[oi0]));
+        if (ocls0 == bc.BIDI_PDI && cast(i64, _mp.ptr[oi0]) < n) { k = e0; }
+        else {
+            let is i64 as L with mut = 0;
+            let is i64 as kk with mut = k;
+            let is i64 as cont with mut = 1;
+            while (cont == 1) {
+                let is i64 as rl = cast(i64, _el.ptr[_sq.ptr[kk]]);
+                let is i64 as e with mut = kk;
+                while (e < m && cast(i64, _el.ptr[_sq.ptr[e]]) == rl) { _sp2.ptr[L] = _sq.ptr[e]; L = L + 1; e = e + 1; }
+                let is i64 as lastorig = cast(i64, _sp2.ptr[L - 1]);
+                let is i64 as lastcls = cast(i64, bc.bidi_get(cps[lastorig]));
+                if (_is_isolate_init(lastcls) == 1 && cast(i64, _mp.ptr[lastorig]) < n) {
+                    kk = _find_filtered(cast(i64, _mp.ptr[lastorig]), m);
+                    if (kk < 0) { cont = 0; }
+                } else { cont = 0; }
+            }
+            let is i64 as seqlev = cast(i64, _el.ptr[_sp2.ptr[0]]);
+            let is i64 as prevlev with mut = para;
+            if (k > 0) { prevlev = cast(i64, _el.ptr[_sq.ptr[k - 1]]); }
+            let is i64 as hl with mut = seqlev;
+            if (prevlev > hl) { hl = prevlev; }
+            let is i64 as sosv with mut = bc.BIDI_L;
+            if ((hl & 1) == 1) { sosv = bc.BIDI_R; }
+            let is i64 as lastorig2 = cast(i64, _sp2.ptr[L - 1]);
+            let is i64 as lastcls2 = cast(i64, bc.bidi_get(cps[lastorig2]));
+            let is i64 as nextlev with mut = para;
+            if (_is_isolate_init(lastcls2) == 1 && cast(i64, _mp.ptr[lastorig2]) >= n) { nextlev = para; }
+            else {
+                let is i64 as lf = _find_filtered(lastorig2, m);
+                if (lf + 1 < m) { nextlev = cast(i64, _el.ptr[_sq.ptr[lf + 1]]); }
+            }
+            let is i64 as hr with mut = seqlev;
+            if (nextlev > hr) { hr = nextlev; }
+            let is i64 as eosv with mut = bc.BIDI_L;
+            if ((hr & 1) == 1) { eosv = bc.BIDI_R; }
+            _apply_rules(cps, _sp2.ptr, L, sosv, eosv, seqlev, lev);
+            k = e0;
+        }
+    }
+}
+
+// L2 reorder: visual order of all positions. Caller filters X9-removed chars.
+fn reorder(lev as *u8, n as i64, vis as *i64) as i64 {
+    if (n <= 0) { return 0; }
+    let is i64 as i with mut = 0;
+    while (i < n) { vis[i] = i; i = i + 1; }
+    let is i64 as maxl with mut = 0;
+    let is i64 as minodd with mut = 1000;
+    i = 0;
+    while (i < n) {
+        let is i64 as l = cast(i64, lev[i]);
+        if (l > maxl) { maxl = l; }
+        if ((l & 1) == 1 && l < minodd) { minodd = l; }
+        i = i + 1;
+    }
+    let is i64 as level with mut = maxl;
+    while (level >= minodd) {
+        i = 0;
+        while (i < n) {
+            if (cast(i64, lev[i]) >= level) {
+                let is i64 as s = i;
+                while (i < n && cast(i64, lev[i]) >= level) { i = i + 1; }
+                _rev(vis, s, i - 1);
+            } else { i = i + 1; }
+        }
+        level = level - 1;
+    }
+    return n;
+}

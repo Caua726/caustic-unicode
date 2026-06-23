@@ -44,6 +44,7 @@ run_case conf_grapheme  tests/conformance/conf_grapheme.cst
 run_case conf_word      tests/conformance/conf_word.cst
 run_case conf_sentence  tests/conformance/conf_sentence.cst
 run_case conf_linebreak tests/conformance/conf_linebreak.cst
+run_case conf_bidi      tests/conformance/conf_bidi.cst
 
 if [ "$fail" -eq 0 ]; then echo "all green"; else echo "FAILURES"; fi
 exit $fail

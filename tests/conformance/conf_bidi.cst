@@ -1,0 +1,183 @@
+// =======================================================
+// tests/conformance/conf_bidi.cst
+// Runs the official BidiCharacterTest.txt (16.0).
+// Fields: cps ; paragraph_dir(0 LTR/1 RTL/2 auto) ; resolved_level ;
+//         levels (x = X9-removed) ; reorder (removed omitted).
+// Checks paragraph level, per-cp levels, and the visual reorder.
+// Exit 0 = all pass.
+// =======================================================
+
+use "std/io.cst"  as io;
+use "std/mem.cst" only bins, core as mem;
+use "../../bidi/bidi.cst" as bidi;
+use "../../core/buf.cst"  as buf;
+
+fn slurp(path as *u8, out_len as *i32) as *u8 {
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return cast(*u8, 0); }
+    let is i64 as size = io._lseek(fd, 0, io._SEEK_END);
+    io._lseek(fd, 0, io._SEEK_SET);
+    if (size <= 0) { io._close_fd(fd); return cast(*u8, 0); }
+    let is *u8 as b = mem.core.mmap_anon(size + 1);
+    io.read_exact(fd, b, size);
+    io._close_fd(fd);
+    out_len[0] = cast(i32, size);
+    return b;
+}
+fn line_end(p as *u8, len as i32, pos as i32) as i32 {
+    let is i32 as i with mut = pos;
+    while (i < len) { if (p[i] == 10) { return i; } i = i + 1; }
+    return len;
+}
+fn field(p as *u8, llen as i32, idx as i32, endout as *i32) as i32 {
+    let is i32 as cur with mut = 0;
+    let is i32 as i with mut = 0;
+    let is i32 as fstart with mut = 0;
+    while (cur < idx) {
+        while (i < llen && p[i] != 59) { i = i + 1; }
+        if (i >= llen) { return cast(i32, 0 - 1); }
+        i = i + 1; cur = cur + 1; fstart = i;
+    }
+    let is i32 as e with mut = fstart;
+    while (e < llen && p[e] != 59) { e = e + 1; }
+    endout[0] = e;
+    return fstart;
+}
+fn hexval(c as u8) as i32 {
+    if (c >= 48 && c <= 57)  { return cast(i32, c) - 48; }
+    if (c >= 65 && c <= 70)  { return cast(i32, c) - 55; }
+    if (c >= 97 && c <= 102) { return cast(i32, c) - 87; }
+    return cast(i32, 0 - 1);
+}
+fn parse_dec(p as *u8, s as i32, e as i32) as i32 {
+    let is i32 as v with mut = 0;
+    let is i32 as i with mut = s;
+    while (i < e) { if (p[i] < 48 || p[i] > 57) { return v; } v = v * 10 + (cast(i32, p[i]) - 48); i = i + 1; }
+    return v;
+}
+
+fn main() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tests/vectors/BidiCharacterTest.txt", &len);
+    if (cast(i64, p) == 0) { io.write_str(1, "cannot read BidiCharacterTest.txt\n"); return 99; }
+
+    let is buf.CpBuf as cps = buf.cpbuf_new(64);
+    let is buf.ByteBuf as lev = buf.bytebuf_new(64);
+    let is buf.ByteBuf as flev = buf.bytebuf_new(64);
+    let is [1024]i64 as exlev;        // expected level, or -1 for 'x' (removed)
+    let is [1024]i64 as fidx;
+    let is [1024]i64 as fvis;
+    let is [1024]i64 as exreorder;
+
+    let is i32 as lineno with mut = 0;
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        lineno = lineno + 1;
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            if (lp[0] != 35) {
+                let is i32 as f0e with mut = 0;
+                let is i32 as f0s = field(lp, llen, 0, &f0e);
+                let is i32 as f1e with mut = 0;
+                let is i32 as f1s = field(lp, llen, 1, &f1e);
+                let is i32 as f2e with mut = 0;
+                let is i32 as f2s = field(lp, llen, 2, &f2e);
+                let is i32 as f3e with mut = 0;
+                let is i32 as f3s = field(lp, llen, 3, &f3e);
+                let is i32 as f4e with mut = 0;
+                let is i32 as f4s = field(lp, llen, 4, &f4e);
+                if (f0s >= 0 && f1s >= 0 && f2s >= 0 && f3s >= 0 && f4s >= 0) {
+                    // cps
+                    buf.cpbuf_reset(&cps);
+                    let is i32 as q with mut = f0s;
+                    while (q < f0e) {
+                        while (q < f0e && lp[q] == 32) { q = q + 1; }
+                        let is i32 as ts = q;
+                        while (q < f0e && lp[q] != 32) { q = q + 1; }
+                        if (q > ts) { buf.cpbuf_push(&cps, parse_hex_range(lp, ts, q)); }
+                    }
+                    let is i64 as n = cps.len;
+                    if (n > 0 && n < 1024) {
+                        let is i64 as base = cast(i64, parse_dec(lp, f1s, f1e));
+                        let is i64 as expara = cast(i64, parse_dec(lp, f2s, f2e));
+                        // expected levels
+                        let is i64 as nl with mut = 0;
+                        q = f3s;
+                        while (q < f3e) {
+                            while (q < f3e && lp[q] == 32) { q = q + 1; }
+                            let is i32 as ts = q;
+                            while (q < f3e && lp[q] != 32) { q = q + 1; }
+                            if (q > ts) {
+                                if (lp[ts] == 120) { exlev[nl] = 0 - 1; }   // 'x'
+                                else { exlev[nl] = cast(i64, parse_dec(lp, ts, q)); }
+                                nl = nl + 1;
+                            }
+                        }
+                        // expected reorder
+                        let is i64 as nr with mut = 0;
+                        q = f4s;
+                        while (q < f4e) {
+                            while (q < f4e && lp[q] == 32) { q = q + 1; }
+                            let is i32 as ts = q;
+                            while (q < f4e && lp[q] != 32) { q = q + 1; }
+                            if (q > ts) { exreorder[nr] = cast(i64, parse_dec(lp, ts, q)); nr = nr + 1; }
+                        }
+
+                        if (lev.cap < n) { buf.bytebuf_reserve(&lev, n); }
+                        let is i64 as para = bidi.resolve_levels(cps.ptr, n, base, lev.ptr);
+                        if (para != expara) { io.write_str(1, "FAIL line "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " para\n"); return 1; }
+                        // levels
+                        let is i64 as i with mut = 0;
+                        while (i < n) {
+                            if (exlev[i] >= 0) {
+                                if (cast(i64, lev.ptr[i]) != exlev[i]) {
+                                    io.write_str(1, "FAIL line "); io.write_int(1, cast(i64, lineno));
+                                    io.write_str(1, " level at "); io.write_int(1, i); io.write_str(1, "\n");
+                                    return 2;
+                                }
+                            }
+                            i = i + 1;
+                        }
+                        // reorder over the non-removed (X9-filtered) characters
+                        if (flev.cap < n) { buf.bytebuf_reserve(&flev, n); }
+                        let is i64 as fm with mut = 0;
+                        let is i64 as oo with mut = 0;
+                        while (oo < n) {
+                            if (exlev[oo] >= 0) { flev.ptr[fm] = lev.ptr[oo]; fidx[fm] = oo; fm = fm + 1; }
+                            oo = oo + 1;
+                        }
+                        bidi.reorder(flev.ptr, fm, cast(*i64, &fvis));
+                        let is i64 as okr with mut = 1;
+                        if (fm != nr) { okr = 0; }
+                        let is i64 as kk with mut = 0;
+                        while (kk < fm && okr == 1) {
+                            if (exreorder[kk] != fidx[fvis[kk]]) { okr = 0; }
+                            kk = kk + 1;
+                        }
+                        if (okr == 0) {
+                            io.write_str(1, "FAIL line "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " reorder\n");
+                            return 3;
+                        }
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    io.write_str(1, "conf_bidi: all lines pass\n");
+    return 0;
+}
+
+fn parse_hex_range(p as *u8, s as i32, e as i32) as i32 {
+    let is i32 as v with mut = 0;
+    let is i32 as i with mut = s;
+    while (i < e) {
+        let is i32 as d = hexval(p[i]);
+        if (d < 0) { return v; }
+        v = (v << 4) | d;
+        i = i + 1;
+    }
+    return v;
+}

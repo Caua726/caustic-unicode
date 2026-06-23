@@ -20,6 +20,7 @@ use "normalize/normalize.cst" as normalize;
 use "case/case.cst"  as casemap;
 use "segment/segment.cst" as segment;
 use "linebreak/linebreak.cst" as linebreak;
+use "bidi/bidi.cst"  as bidi;
 
 // Library version == the Unicode version it implements.
 fn version() as *u8 {
