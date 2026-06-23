@@ -1530,6 +1530,174 @@ fn gen_idna() as i32 {
     return 0;
 }
 
+// ---- Unified_Ideograph (PropList.txt) for UCA implicit weights ----
+fn gen_uideo() as i32 {
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as l with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/PropList.txt", &l);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    mark_prop(p, l, "Unified_Ideograph", 1, flat);
+    io.write_str(1, "uideo:");
+    return build_and_emit("ucd/tables/uideo.cst", "uideo", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+}
+
+// Read a hex field; advance *q to the terminator.
+fn _hexf(p as *u8, q as *i32, end as i32) as i32 {
+    let is i32 as v with mut = 0;
+    while (q[0] < end && hexval(p[q[0]]) >= 0) { v = (v << 4) | hexval(p[q[0]]); q[0] = q[0] + 1; }
+    return v;
+}
+
+// Parse the collation-element list "[.PPPP.SSSS.TTTT]..." in p[s..e). Appends
+// to the CE pool (2 u32 per CE: prim|var<<16, sec|ter<<16). Returns CE count.
+fn _parse_ces(p as *u8, s as i32, e as i32, pool as *u32, pc as *i32) as i32 {
+    let is i32 as q with mut = s;
+    let is i32 as count with mut = 0;
+    while (q < e) {
+        while (q < e && p[q] != 91) { q = q + 1; }       // '['
+        if (q >= e) { return count; }
+        q = q + 1;
+        let is i32 as var with mut = 0;
+        if (p[q] == 42) { var = 1; }                     // '*'
+        q = q + 1;
+        let is i32 as prim = _hexf(p, &q, e);
+        if (q < e && p[q] == 46) { q = q + 1; }          // '.'
+        let is i32 as sec = _hexf(p, &q, e);
+        if (q < e && p[q] == 46) { q = q + 1; }
+        let is i32 as ter = _hexf(p, &q, e);
+        pool[pc[0]] = cast(u32, prim) | (cast(u32, var) << 16);
+        pool[pc[0] + 1] = cast(u32, sec) | (cast(u32, ter) << 16);
+        pc[0] = pc[0] + 2;
+        count = count + 1;
+    }
+    return count;
+}
+
+// ---- DUCET / UCA collation table (allkeys.txt) ----
+fn gen_collate() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/allkeys.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));   // cp -> meta idx
+    let is *u32 as meta = cast(*u32, mem.core.mmap_anon(cast(i64, 40000) * 4));   // off(0..23)|len(24..31)
+    let is *u32 as pool = cast(*u32, mem.core.mmap_anon(cast(i64, 120000) * 4));  // 2 u32 per CE
+    if (cast(i64, flat) == 0 || cast(i64, meta) == 0 || cast(i64, pool) == 0) { return cast(i32, 0 - 1); }
+    // contraction arrays
+    let is *u32 as cc0 = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as cc1 = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as cc2 = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as ccoff = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as cclen = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *i64 as cckey = cast(*i64, mem.core.mmap_anon(cast(i64, 2048) * 8));
+    let is i32 as mcount with mut = 1;      // meta idx 0 = not in DUCET (implicit weight)
+    meta[0] = cast(u32, 0);
+    let is i32 as pc with mut = 0;
+    let is i32 as nct with mut = 0;
+
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0 && p[pos] != 35 && p[pos] != 64) {     // skip '#' and '@'
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as semi = find_char(lp, 0, llen, 59);
+            if (semi >= 0) {
+                // parse the code points before ';'
+                let is i32 as c0 with mut = cast(i32, 0 - 1);
+                let is i32 as c1 with mut = cast(i32, 0 - 1);
+                let is i32 as c2 with mut = cast(i32, 0 - 1);
+                let is i32 as ncp with mut = 0;
+                let is i32 as q with mut = 0;
+                while (q < semi) {
+                    while (q < semi && (lp[q] == 32 || lp[q] == 9)) { q = q + 1; }
+                    let is i32 as ts = q;
+                    while (q < semi && lp[q] != 32 && lp[q] != 9) { q = q + 1; }
+                    if (q > ts) {
+                        let is i32 as cv = parse_hex(lp, ts, q);
+                        if (ncp == 0) { c0 = cv; } else if (ncp == 1) { c1 = cv; } else if (ncp == 2) { c2 = cv; }
+                        ncp = ncp + 1;
+                    }
+                }
+                // CE end = '#' or line end
+                let is i32 as ce_end with mut = llen;
+                let is i32 as hh = find_char(lp, semi, llen, 35);
+                if (hh >= 0) { ce_end = hh; }
+                let is i32 as off = pc / 2;
+                let is i32 as nce = _parse_ces(lp, semi + 1, ce_end, pool, &pc);
+                if (ncp == 1 && c0 >= 0 && c0 < NUMCP) {
+                    meta[mcount] = cast(u32, off) | (cast(u32, nce) << 24);
+                    flat[c0] = cast(u16, mcount);
+                    mcount = mcount + 1;
+                } else if (ncp >= 2 && nct < 2048) {
+                    cc0[nct] = cast(u32, c0); cc1[nct] = cast(u32, c1);
+                    if (ncp >= 3) { cc2[nct] = cast(u32, c2); } else { cc2[nct] = cast(u32, 2147483647); }
+                    ccoff[nct] = cast(u32, off); cclen[nct] = cast(u32, nce);
+                    let is i64 as k2 with mut = 0;
+                    if (ncp >= 3) { k2 = cast(i64, c2); }
+                    cckey[nct] = (cast(i64, c0) << 42) | (cast(i64, c1) << 21) | k2;
+                    nct = nct + 1;
+                }
+            }
+        }
+        pos = le + 1;
+    }
+
+    // sort contractions by (c0,c1,c2) via key permutation (insertion sort)
+    let is *u32 as ord = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is i32 as a with mut = 0;
+    while (a < nct) { ord[a] = cast(u32, a); a = a + 1; }
+    a = 1;
+    while (a < nct) {
+        let is i32 as oa = cast(i32, ord[a]);
+        let is i64 as ka = cckey[oa];
+        let is i32 as b with mut = a - 1;
+        while (b >= 0 && cckey[cast(i32, ord[b])] > ka) { ord[b + 1] = ord[b]; b = b - 1; }
+        ord[b + 1] = cast(u32, oa);
+        a = a + 1;
+    }
+    let is *u32 as s0 = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as s1 = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as s2 = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as soff = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    let is *u32 as slen = cast(*u32, mem.core.mmap_anon(cast(i64, 2048) * 4));
+    a = 0;
+    while (a < nct) {
+        let is i32 as o = cast(i32, ord[a]);
+        s0[a] = cc0[o]; s1[a] = cc1[o]; s2[a] = cc2[o]; soff[a] = ccoff[o]; slen[a] = cclen[o];
+        a = a + 1;
+    }
+
+    let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
+    let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    let is i32 as dc = build_trie(flat, 0, index, data);
+    let is i64 as fd = io._open_write("ucd/tables/collate.cst");
+    if (fd < 0) { return cast(i32, 0 - 1); }
+    let is [16384]u8 as wbuf;
+    let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
+    ws(&w, "// GENERATED by tools/gen.cst from allkeys.txt (UCA 16.0). DO NOT EDIT.\n");
+    ws(&w, "// trie cp->meta idx (0=implicit). meta u32: off(0..23) len(24..31) in CE units.\n");
+    ws(&w, "// CE pool: 2 u32 per CE = (prim|var<<16, sec|ter<<16). Contractions sorted by (c0,c1,c2).\n");
+    ws(&w, "use \"../trie.cst\" as trie;\n\n");
+    let is i32 as nidx = emit_u16_blob(&w, "collate", "_index", index, NBLOCKS);
+    let is i32 as ndat = emit_u16_blob(&w, "collate", "_data", data, dc);
+    emit_tail(&w, "collate", nidx, ndat, U_MAXCP, 0);
+    emit_flat_u32(&w, "collate_meta", meta, mcount);
+    emit_flat_u32(&w, "collate_pool", pool, pc);
+    emit_flat_u32(&w, "collate_c0", s0, nct);
+    emit_flat_u32(&w, "collate_c1", s1, nct);
+    emit_flat_u32(&w, "collate_c2", s2, nct);
+    emit_flat_u32(&w, "collate_coff", soff, nct);
+    emit_flat_u32(&w, "collate_clen", slen, nct);
+    ws(&w, "let is i32 as collate_nct with imut = "); wi(&w, nct); ws(&w, ";\n");
+    io.flush(&w);
+    io._close_fd(fd);
+    io.write_str(1, "collate:  singles="); io.write_int(1, cast(i64, mcount));
+    io.write_str(1, " ces="); io.write_int(1, cast(i64, pc / 2));
+    io.write_str(1, " contractions="); io.write_int(1, cast(i64, nct)); io.write_str(1, "\n");
+    return 0;
+}
+
 fn main() as i32 {
     if (gen_gc() < 0)  { return 1; }
     if (gen_ccc() < 0) { return 2; }
@@ -1551,6 +1719,8 @@ fn main() as i32 {
     if (gen_brackets() < 0) { return 18; }
     if (gen_mirror() < 0) { return 19; }
     if (gen_idna() < 0) { return 20; }
+    if (gen_uideo() < 0) { return 21; }
+    if (gen_collate() < 0) { return 22; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }

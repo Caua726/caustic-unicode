@@ -1,0 +1,261 @@
+// =======================================================
+// caustic-unicode/collate/collate.cst
+// Unicode Collation Algorithm (UCA, DUCET). Produces sort keys and compares
+// strings. Pipeline: NFD -> collation elements (with contractions and the
+// implicit-weight formula for Han/Tangut/unassigned) -> variable weighting
+// (NON_IGNORABLE or SHIFTED) -> level-by-level sort key.
+// =======================================================
+
+use "../core/errno.cst"        as errno;
+use "../core/buf.cst"          as buf;
+use "../normalize/normalize.cst" as nz;
+use "../ucd/props.cst"         as props;
+use "../ucd/tables/collate.cst" as co;
+use "../ucd/tables/uideo.cst"  as ui;
+
+let is i64 as VAR_NON_IGNORABLE with imut = 0;
+let is i64 as VAR_SHIFTED       with imut = 1;
+
+let is buf.CpBuf as _nfd with mut;       // NFD scratch
+let is buf.CpBuf as _ce  with mut;       // raw CEs, 4 i32 each (prim,sec,ter,var)
+let is buf.ByteBuf as _used with mut;    // consumed-by-contraction flags
+let is i32 as _ready with mut = 0;
+
+fn _ensure() as void {
+    if (_ready == 0) { _nfd = buf.cpbuf_new(64); _ce = buf.cpbuf_new(256); _used = buf.bytebuf_new(64); _ready = 1; }
+}
+
+// Append the two implicit-weight CEs for a cp not present in the DUCET.
+fn _implicit(cp as i32, out as *buf.CpBuf) as void {
+    let is i32 as aaaa with mut = 0;
+    let is i32 as bbbb with mut = 0;
+    if (cp >= 94208 && cp <= 101119) { aaaa = 64256; bbbb = (cp - 94208) | 32768; }        // 17000..18AFF Tangut FB00
+    else if (cp >= 101632 && cp <= 101759) { aaaa = 64256; bbbb = (cp - 94208) | 32768; }  // 18D00..18D7F Tangut Supp FB00 (shares Tangut offset)
+    else if (cp >= 110960 && cp <= 111359) { aaaa = 64257; bbbb = (cp - 110960) | 32768; } // 1B170..1B2FF Nushu FB01
+    else if (cp >= 101120 && cp <= 101631) { aaaa = 64258; bbbb = (cp - 101120) | 32768; } // 18B00..18CFF Khitan FB02
+    else if (ui.uideo_get(cp) == 1) {
+        let is i32 as base with mut = 64384;                                                // FB80 (extensions)
+        if ((cp >= 19968 && cp <= 40959) || (cp >= 63744 && cp <= 64255)) { base = 64320; } // 4E00..9FFF, F900..FAFF -> FB40
+        aaaa = base + (cp >> 15);
+        bbbb = (cp & 32767) | 32768;
+    } else {
+        aaaa = 64448 + (cp >> 15);                                                          // FBC0 (unassigned/other)
+        bbbb = (cp & 32767) | 32768;
+    }
+    buf.cpbuf_push(out, aaaa); buf.cpbuf_push(out, 32); buf.cpbuf_push(out, 2); buf.cpbuf_push(out, 0);
+    buf.cpbuf_push(out, bbbb); buf.cpbuf_push(out, 0);  buf.cpbuf_push(out, 0); buf.cpbuf_push(out, 0);
+}
+
+// Append the `len` CEs at CE-index `off` from the DUCET pool.
+fn _append_pool(off as i32, len as i32, out as *buf.CpBuf) as void {
+    let is i32 as k with mut = 0;
+    while (k < len) {
+        let is i32 as a = co.collate_pool_at((off + k) * 2);
+        let is i32 as b = co.collate_pool_at((off + k) * 2 + 1);
+        buf.cpbuf_push(out, a & 65535);          // primary
+        buf.cpbuf_push(out, b & 65535);          // secondary
+        buf.cpbuf_push(out, (b >> 16) & 65535);  // tertiary
+        buf.cpbuf_push(out, (a >> 16) & 1);      // variable
+        k = k + 1;
+    }
+}
+
+// Contraction entry index for (c0, c1, c2), or -1. c2 = 2147483647 for a
+// two-code-point contraction. Binary search on c0, then scan the group.
+fn _ct_find(c0 as i32, c1 as i32, c2 as i32) as i32 {
+    let is i32 as lo with mut = 0;
+    let is i32 as hi with mut = co.collate_nct - 1;
+    let is i32 as found with mut = cast(i32, 0 - 1);
+    while (lo <= hi) {
+        let is i32 as mid = (lo + hi) / 2;
+        let is i32 as v = co.collate_c0_at(mid);
+        if (v < c0) { lo = mid + 1; }
+        else if (v > c0) { hi = mid - 1; }
+        else { found = mid; hi = mid - 1; }
+    }
+    if (found < 0) { return cast(i32, 0 - 1); }
+    let is i32 as e with mut = found;
+    while (e < co.collate_nct && co.collate_c0_at(e) == c0) {
+        if (co.collate_c1_at(e) == c1 && co.collate_c2_at(e) == c2) { return e; }
+        e = e + 1;
+    }
+    return cast(i32, 0 - 1);
+}
+
+// Emit the collation element(s) for the element starting at cps[i], applying
+// contiguous and discontiguous (UAX #10 S2.1.1) contraction matching, and
+// marking consumed positions in _used.
+fn _emit_element(cps as *i32, n as i64, i as i64, out as *buf.CpBuf) as void {
+    let is i32 as c0 = cps[i];
+    let is i32 as bestOff with mut = cast(i32, 0 - 1);
+    let is i32 as bestLen with mut = 0;
+    let is i64 as matchLen with mut = 1;
+    let is i32 as c1val with mut = cast(i32, 0 - 1);
+    let is i32 as SENT with imut = 2147483647;
+
+    // contiguous extension: try 3-cp, then 2-cp (a 3-cp contraction's 2-cp
+    // prefix is not necessarily itself a contraction)
+    if (i + 2 < n && _used.ptr[i + 1] == 0 && _used.ptr[i + 2] == 0) {
+        let is i32 as e3 = _ct_find(c0, cps[i + 1], cps[i + 2]);
+        if (e3 >= 0) { bestOff = co.collate_coff_at(e3); bestLen = co.collate_clen_at(e3); c1val = cps[i + 1]; matchLen = 3; }
+    }
+    if (matchLen < 2 && i + 1 < n && _used.ptr[i + 1] == 0) {
+        let is i32 as e2 = _ct_find(c0, cps[i + 1], SENT);
+        if (e2 >= 0) { bestOff = co.collate_coff_at(e2); bestLen = co.collate_clen_at(e2); c1val = cps[i + 1]; matchLen = 2; }
+    }
+    if (matchLen >= 2) { _used.ptr[i + 1] = cast(u8, 1); }
+    if (matchLen >= 3) { _used.ptr[i + 2] = cast(u8, 1); }
+
+    // discontiguous extension (skip lower-ccc, unblocked combining marks)
+    if (matchLen < 3) {
+        let is i64 as last_cc with mut = 0;
+        let is i64 as k with mut = i + matchLen;
+        while (k < n) {
+            if (_used.ptr[k] == 1) { k = k + 1; }
+            else {
+                let is i64 as cc = props.combining_class(cps[k]);
+                if (cc == 0) { k = n; }                          // starter blocks; stop
+                else if (cc <= last_cc) { last_cc = cc; k = k + 1; }
+                else {
+                    let is i32 as cand with mut = cast(i32, 0 - 1);
+                    if (matchLen == 1) { cand = _ct_find(c0, cps[k], SENT); }
+                    else { cand = _ct_find(c0, c1val, cps[k]); }
+                    if (cand >= 0) {
+                        bestOff = co.collate_coff_at(cand); bestLen = co.collate_clen_at(cand);
+                        if (matchLen == 1) { c1val = cps[k]; }
+                        _used.ptr[k] = cast(u8, 1);
+                        matchLen = matchLen + 1;
+                        if (matchLen >= 3) { k = n; } else { k = k + 1; }
+                    } else { last_cc = cc; k = k + 1; }
+                }
+            }
+        }
+    }
+
+    if (bestOff >= 0) { _append_pool(bestOff, bestLen, out); }
+    else {
+        let is i32 as m = co.collate_get(c0);
+        if (m != 0) { let is i32 as rec = co.collate_meta_at(m); _append_pool(rec & 16777215, (rec >> 24) & 255, out); }
+        else { _implicit(c0, out); }
+    }
+}
+
+// Build the raw CE list for a normalized cp run.
+fn _build_ces(cps as *i32, n as i64, out as *buf.CpBuf) as void {
+    buf.bytebuf_reserve(&_used, n); _used.len = n;
+    let is i64 as z with mut = 0;
+    while (z < n) { _used.ptr[z] = cast(u8, 0); z = z + 1; }
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (_used.ptr[i] == 0) { _emit_element(cps, n, i, out); }
+        i = i + 1;
+    }
+}
+
+// Build the sort key (sequence of i32 weights, level-separated by 0) into key.
+fn sort_key(cps as *i32, n as i64, mode as i64, key as *buf.CpBuf) as i64 {
+    _ensure();
+    buf.cpbuf_reset(&_nfd);
+    nz.nfd(cps, n, &_nfd);
+    buf.cpbuf_reset(&_ce);
+    _build_ces(_nfd.ptr, _nfd.len, &_ce);
+    let is i64 as nce = _ce.len / 4;
+
+    // L1 (primaries)
+    let is i64 as last_var with mut = 0;
+    let is i64 as j with mut = 0;
+    while (j < nce) {
+        let is i32 as p = _ce.ptr[j * 4 + 0];
+        let is i32 as var = _ce.ptr[j * 4 + 3];
+        let is i32 as ap with mut = p;
+        if (mode == VAR_SHIFTED) {
+            if (var == 1 && p != 0) { ap = 0; last_var = 1; }
+            else if (p == 0) { ap = 0; }
+            else { ap = p; last_var = 0; }
+        }
+        if (ap != 0) { buf.cpbuf_push(key, ap); }
+        j = j + 1;
+    }
+    buf.cpbuf_push(key, 0);
+    // L2 (secondaries)
+    last_var = 0;
+    j = 0;
+    while (j < nce) {
+        let is i32 as p = _ce.ptr[j * 4 + 0];
+        let is i32 as s = _ce.ptr[j * 4 + 1];
+        let is i32 as var = _ce.ptr[j * 4 + 3];
+        let is i32 as as2 with mut = s;
+        if (mode == VAR_SHIFTED) {
+            if (var == 1 && p != 0) { as2 = 0; last_var = 1; }
+            else if (p == 0 && s == 0) { as2 = 0; }
+            else if (p == 0) { if (last_var == 1) { as2 = 0; } else { as2 = s; } }
+            else { as2 = s; last_var = 0; }
+        }
+        if (as2 != 0) { buf.cpbuf_push(key, as2); }
+        j = j + 1;
+    }
+    buf.cpbuf_push(key, 0);
+    // L3 (tertiaries)
+    last_var = 0;
+    j = 0;
+    while (j < nce) {
+        let is i32 as p = _ce.ptr[j * 4 + 0];
+        let is i32 as s = _ce.ptr[j * 4 + 1];
+        let is i32 as t = _ce.ptr[j * 4 + 2];
+        let is i32 as var = _ce.ptr[j * 4 + 3];
+        let is i32 as at with mut = t;
+        if (mode == VAR_SHIFTED) {
+            if (var == 1 && p != 0) { at = 0; last_var = 1; }
+            else if (p == 0 && s == 0 && t == 0) { at = 0; }
+            else if (p == 0) { if (last_var == 1) { at = 0; } else { at = t; } }
+            else { at = t; last_var = 0; }
+        }
+        if (at != 0) { buf.cpbuf_push(key, at); }
+        j = j + 1;
+    }
+    // L4 (quaternaries) only for SHIFTED
+    if (mode == VAR_SHIFTED) {
+        buf.cpbuf_push(key, 0);
+        last_var = 0;
+        j = 0;
+        while (j < nce) {
+            let is i32 as p = _ce.ptr[j * 4 + 0];
+            let is i32 as s = _ce.ptr[j * 4 + 1];
+            let is i32 as t = _ce.ptr[j * 4 + 2];
+            let is i32 as var = _ce.ptr[j * 4 + 3];
+            let is i32 as q with mut = 0;
+            if (var == 1 && p != 0) { q = p; last_var = 1; }
+            else if (p == 0 && s == 0 && t == 0) { q = 0; }
+            else if (p == 0) { if (last_var == 1) { q = 0; } else { q = 65535; } }
+            else { q = 65535; last_var = 0; }
+            if (q != 0) { buf.cpbuf_push(key, q); }
+            j = j + 1;
+        }
+    }
+    return key.len;
+}
+
+// Lexicographic compare of two sort keys. -1 / 0 / 1.
+fn _key_cmp(a as *buf.CpBuf, b as *buf.CpBuf) as i64 {
+    let is i64 as i with mut = 0;
+    while (i < a.len && i < b.len) {
+        if (a.ptr[i] < b.ptr[i]) { return 0 - 1; }
+        if (a.ptr[i] > b.ptr[i]) { return 1; }
+        i = i + 1;
+    }
+    if (a.len < b.len) { return 0 - 1; }
+    if (a.len > b.len) { return 1; }
+    return 0;
+}
+
+// Compare two cp runs by collation. -1 / 0 / 1.
+fn compare(a as *i32, an as i64, b as *i32, bn as i64, mode as i64) as i64 {
+    let is buf.CpBuf as ka = buf.cpbuf_new(32);
+    let is buf.CpBuf as kb = buf.cpbuf_new(32);
+    sort_key(a, an, mode, &ka);
+    sort_key(b, bn, mode, &kb);
+    let is i64 as r = _key_cmp(&ka, &kb);
+    buf.cpbuf_free(&ka);
+    buf.cpbuf_free(&kb);
+    return r;
+}

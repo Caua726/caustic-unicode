@@ -22,6 +22,7 @@ use "segment/segment.cst" as segment;
 use "linebreak/linebreak.cst" as linebreak;
 use "bidi/bidi.cst"  as bidi;
 use "idna/idna.cst"  as idna;
+use "collate/collate.cst" as collate;
 
 // Library version == the Unicode version it implements.
 fn version() as *u8 {
