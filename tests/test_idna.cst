@@ -21,34 +21,35 @@ fn eqs(o as *buf.ByteBuf, s as *u8) as i32 {
 
 fn main() as i32 {
     let is buf.ByteBuf as o = buf.bytebuf_new(32);
+    let is i64 as err with mut = 0;
 
     // faß.de -> xn--fa-hia.de (non-transitional keeps ß, punycodes it)
-    buf.bytebuf_reset(&o); uts46.to_ascii("fa\xC3\x9F.de", 7, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("fa\xC3\x9F.de", 7, 0, &o, &err);
     if (eqs(&o, "xn--fa-hia.de") == 0) { return 1; }
     // faß.de transitional -> fass.de (ß -> ss)
-    buf.bytebuf_reset(&o); uts46.to_ascii("fa\xC3\x9F.de", 7, uts46.UTS46_TRANSITIONAL, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("fa\xC3\x9F.de", 7, uts46.UTS46_TRANSITIONAL, &o, &err);
     if (eqs(&o, "fass.de") == 0) { return 2; }
     // Faß.de -> xn--fa-hia.de (uppercase F mapped to f)
-    buf.bytebuf_reset(&o); uts46.to_ascii("Fa\xC3\x9F.de", 7, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("Fa\xC3\x9F.de", 7, 0, &o, &err);
     if (eqs(&o, "xn--fa-hia.de") == 0) { return 3; }
     // to_unicode(xn--fa-hia.de) -> faß.de
-    buf.bytebuf_reset(&o); uts46.to_unicode("xn--fa-hia.de", 13, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_unicode("xn--fa-hia.de", 13, 0, &o, &err);
     if (eqs(&o, "fa\xC3\x9F.de") == 0) { return 4; }
 
     // bücher -> xn--bcher-kva  (RFC 3492 example)
-    buf.bytebuf_reset(&o); uts46.to_ascii("b\xC3\xBCcher", 7, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("b\xC3\xBCcher", 7, 0, &o, &err);
     if (eqs(&o, "xn--bcher-kva") == 0) { return 5; }
-    buf.bytebuf_reset(&o); uts46.to_unicode("xn--bcher-kva", 13, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_unicode("xn--bcher-kva", 13, 0, &o, &err);
     if (eqs(&o, "b\xC3\xBCcher") == 0) { return 6; }
 
     // ASCII passthrough + uppercase mapping
-    buf.bytebuf_reset(&o); uts46.to_ascii("example.com", 11, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("example.com", 11, 0, &o, &err);
     if (eqs(&o, "example.com") == 0) { return 7; }
-    buf.bytebuf_reset(&o); uts46.to_ascii("EXAMPLE.COM", 11, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("EXAMPLE.COM", 11, 0, &o, &err);
     if (eqs(&o, "example.com") == 0) { return 8; }
 
     // CJK: 例え.テスト  (to_ascii then back)
-    buf.bytebuf_reset(&o); uts46.to_ascii("\xE4\xBE\x8B\xE3\x81\x88", 6, 0, &o);
+    buf.bytebuf_reset(&o); uts46.to_ascii("\xE4\xBE\x8B\xE3\x81\x88", 6, 0, &o, &err);
     if (eqs(&o, "xn--r8jz45g") == 0) { return 9; }
 
     // raw Punycode round-trip

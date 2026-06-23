@@ -1,0 +1,167 @@
+// =======================================================
+// tests/conformance/conf_idna.cst  —  official IdnaTestV2.txt (16.0).
+// Columns: source; toUnicode; toUnicodeStatus; toAsciiN; toAsciiNStatus;
+// toAsciiT; toAsciiTStatus. Value columns inherit (toUnicode<-source,
+// toAsciiN<-toUnicode, toAsciiT<-toAsciiN); STATUS columns inherit too
+// (blank toAsciiNStatus <- toUnicodeStatus, etc.). \uXXXX escapes (incl.
+// surrogate pairs) are decoded. We check output on success lines and error
+// detection on failure lines. Exit 0 = all pass.
+// =======================================================
+
+use "std/io.cst"  as io;
+use "std/mem.cst" only bins, core as mem;
+use "../../idna/uts46.cst" as uts46;
+use "../../utf/utf8.cst"   as utf8;
+use "../../core/buf.cst"   as buf;
+
+let is i64 as FLAGS_N with imut = 30;   // STD3 | CHECK_HYPHENS | CHECK_BIDI | CHECK_JOINERS
+let is i64 as FLAGS_T with imut = 31;   // + TRANSITIONAL
+
+fn slurp(path as *u8, out_len as *i32) as *u8 {
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return cast(*u8, 0); }
+    let is i64 as size = io._lseek(fd, 0, io._SEEK_END);
+    io._lseek(fd, 0, io._SEEK_SET);
+    if (size <= 0) { io._close_fd(fd); return cast(*u8, 0); }
+    let is *u8 as b = mem.core.mmap_anon(size + 1);
+    io.read_exact(fd, b, size);
+    io._close_fd(fd);
+    out_len[0] = cast(i32, size);
+    return b;
+}
+fn line_end(p as *u8, len as i32, pos as i32) as i32 {
+    let is i32 as i with mut = pos;
+    while (i < len) { if (p[i] == 10) { return i; } i = i + 1; }
+    return len;
+}
+fn hexval(c as u8) as i32 {
+    if (c >= 48 && c <= 57)  { return cast(i32, c) - 48; }
+    if (c >= 65 && c <= 70)  { return cast(i32, c) - 55; }
+    if (c >= 97 && c <= 102) { return cast(i32, c) - 87; }
+    return cast(i32, 0 - 1);
+}
+fn field(p as *u8, llen as i32, idx as i32, eo as *i32) as i32 {
+    let is i32 as cur with mut = 0;
+    let is i32 as i with mut = 0;
+    let is i32 as fs with mut = 0;
+    while (cur < idx) {
+        while (i < llen && p[i] != 59) { i = i + 1; }
+        if (i >= llen) { return cast(i32, 0 - 1); }
+        i = i + 1; cur = cur + 1; fs = i;
+    }
+    let is i32 as e with mut = fs;
+    while (e < llen && p[e] != 59) { e = e + 1; }
+    while (fs < e && (p[fs] == 32 || p[fs] == 9)) { fs = fs + 1; }
+    while (e > fs && (p[e - 1] == 32 || p[e - 1] == 9)) { e = e - 1; }
+    eo[0] = e;
+    return fs;
+}
+fn _h4(p as *u8, i as i32) as i32 {
+    return (hexval(p[i]) << 12) | (hexval(p[i + 1]) << 8) | (hexval(p[i + 2]) << 4) | hexval(p[i + 3]);
+}
+// Decode a field (with \uXXXX, incl. surrogate pairs) to UTF-8 bytes in out.
+fn unesc(p as *u8, fs as i32, fe as i32, out as *buf.ByteBuf) as void {
+    buf.bytebuf_reset(out);
+    let is [4]u8 as tmp;
+    let is i32 as i with mut = fs;
+    while (i < fe) {
+        if (p[i] == 92 && i + 5 < fe + 1 && i + 1 < fe && p[i + 1] == 117) {   // backslash u
+            let is i32 as cp with mut = _h4(p, i + 2);
+            i = i + 6;
+            if (cp >= 55296 && cp <= 56319 && i + 5 < fe + 1 && i + 1 < fe && p[i] == 92 && p[i + 1] == 117) {
+                let is i32 as lo = _h4(p, i + 2);
+                cp = 65536 + ((cp - 55296) << 10) + (lo - 56320);
+                i = i + 6;
+            }
+            if (cp >= 55296 && cp <= 57343) {                 // lone surrogate -> WTF-8 (invalid UTF-8 on purpose)
+                buf.bytebuf_push(out, cast(u8, 224 | (cp >> 12)));
+                buf.bytebuf_push(out, cast(u8, 128 | ((cp >> 6) & 63)));
+                buf.bytebuf_push(out, cast(u8, 128 | (cp & 63)));
+            } else {
+                let is i64 as k = utf8.encode1(cp, cast(*u8, &tmp));
+                let is i64 as q with mut = 0;
+                while (q < k) { buf.bytebuf_push(out, tmp[q]); q = q + 1; }
+            }
+        } else { buf.bytebuf_push(out, p[i]); i = i + 1; }
+    }
+}
+// 1 if a status field denotes an error (non-blank and not "[]").
+fn st_err(p as *u8, fs as i32, fe as i32) as i64 {
+    if (fe <= fs) { return 0; }
+    if (fe - fs == 2 && p[fs] == 91 && p[fs + 1] == 93) { return 0; }
+    return 1;
+}
+fn beq(o as *buf.ByteBuf, e as *buf.ByteBuf) as i64 {
+    if (o.len != e.len) { return 0; }
+    let is i64 as i with mut = 0;
+    while (i < o.len) { if (o.ptr[i] != e.ptr[i]) { return 0; } i = i + 1; }
+    return 1;
+}
+
+fn main() as i32 {
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tests/vectors/IdnaTestV2.txt", &len);
+    if (cast(i64, p) == 0) { io.write_str(1, "cannot read IdnaTestV2.txt\n"); return 99; }
+
+    let is buf.ByteBuf as src = buf.bytebuf_new(64);
+    let is buf.ByteBuf as etu = buf.bytebuf_new(64);
+    let is buf.ByteBuf as eta = buf.bytebuf_new(64);
+    let is buf.ByteBuf as eat = buf.bytebuf_new(64);
+    let is buf.ByteBuf as o = buf.bytebuf_new(64);
+    let is i64 as err with mut = 0;
+    let is i32 as lineno with mut = 0;
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        lineno = lineno + 1;
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen with mut = le - pos;
+        if (llen > 0) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            if (lp[0] != 35) {
+                let is i32 as hc with mut = 0;                 // cut trailing comment
+                while (hc < llen && lp[hc] != 35) { hc = hc + 1; }
+                llen = hc;
+                let is i32 as se with mut = 0; let is i32 as ss = field(lp, llen, 0, &se);
+                let is i32 as f1e with mut = 0; let is i32 as f1s = field(lp, llen, 1, &f1e);
+                let is i32 as f2e with mut = 0; let is i32 as f2s = field(lp, llen, 2, &f2e);
+                let is i32 as f3e with mut = 0; let is i32 as f3s = field(lp, llen, 3, &f3e);
+                let is i32 as f4e with mut = 0; let is i32 as f4s = field(lp, llen, 4, &f4e);
+                let is i32 as f5e with mut = 0; let is i32 as f5s = field(lp, llen, 5, &f5e);
+                let is i32 as f6e with mut = 0; let is i32 as f6s = field(lp, llen, 6, &f6e);
+                if (ss >= 0 && f6s >= 0) {
+                    unesc(lp, ss, se, &src);
+                    if (f1e > f1s) { unesc(lp, f1s, f1e, &etu); } else { unesc(lp, ss, se, &etu); }       // toUnicode <- source
+                    if (f3e > f3s) { unesc(lp, f3s, f3e, &eta); } else { buf.bytebuf_reset(&eta); buf.bytebuf_append(&eta, etu.ptr, etu.len); }  // toAsciiN <- toUnicode
+                    if (f5e > f5s) { unesc(lp, f5s, f5e, &eat); } else { buf.bytebuf_reset(&eat); buf.bytebuf_append(&eat, eta.ptr, eta.len); }  // toAsciiT <- toAsciiN
+                    let is i64 as tu_err = st_err(lp, f2s, f2e);
+                    let is i64 as tan_err with mut = tu_err;  if (f4e > f4s) { tan_err = st_err(lp, f4s, f4e); }
+                    let is i64 as tat_err with mut = tan_err; if (f6e > f6s) { tat_err = st_err(lp, f6s, f6e); }
+
+                    // toUnicode (non-transitional)
+                    buf.bytebuf_reset(&o); uts46.to_unicode(src.ptr, src.len, FLAGS_N, &o, &err);
+                    if (tu_err == 0) {
+                        if (err != 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tU +err\n"); return 1; }
+                        if (beq(&o, &etu) == 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tU out\n"); return 2; }
+                    } else { if (err == 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tU -err\n"); return 3; } }
+
+                    // toAsciiN (non-transitional)
+                    buf.bytebuf_reset(&o); uts46.to_ascii(src.ptr, src.len, FLAGS_N, &o, &err);
+                    if (tan_err == 0) {
+                        if (err != 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tAN +err\n"); return 4; }
+                        if (beq(&o, &eta) == 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tAN out\n"); return 5; }
+                    } else { if (err == 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tAN -err\n"); return 6; } }
+
+                    // toAsciiT (transitional)
+                    buf.bytebuf_reset(&o); uts46.to_ascii(src.ptr, src.len, FLAGS_T, &o, &err);
+                    if (tat_err == 0) {
+                        if (err != 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tAT +err\n"); return 7; }
+                        if (beq(&o, &eat) == 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tAT out\n"); return 8; }
+                    } else { if (err == 0) { io.write_str(1, "FAIL "); io.write_int(1, cast(i64, lineno)); io.write_str(1, " tAT -err\n"); return 9; } }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    io.write_str(1, "conf_idna: all lines pass\n");
+    return 0;
+}

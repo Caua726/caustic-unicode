@@ -46,6 +46,7 @@ run_case conf_sentence  tests/conformance/conf_sentence.cst
 run_case conf_linebreak tests/conformance/conf_linebreak.cst
 run_case conf_bidi      tests/conformance/conf_bidi.cst
 run_case test_idna      tests/test_idna.cst
+run_case conf_idna      tests/conformance/conf_idna.cst
 run_case conf_collate   tests/conformance/conf_collate.cst
 run_case test_encodings tests/test_encodings.cst
 

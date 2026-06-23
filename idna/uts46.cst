@@ -1,157 +1,295 @@
 // =======================================================
 // caustic-unicode/idna/uts46.cst
-// UTS #46 processing: map code points via the IDNA table, NFC-normalize,
-// split into labels, and Punycode encode/decode per label. Implements
-// to_ascii (A-label form) and to_unicode (U-label form). flags bit 0 =
-// Transitional_Processing (deviation chars ß/ς/ZWJ/ZWNJ map vs kept).
+// UTS #46 ToASCII / ToUnicode with full validation: mapping, NFC, label
+// checks (hyphens, leading combining mark, valid code points, STD3),
+// ContextJ (RFC 5892) for ZWNJ/ZWJ, and the Bidi rule (RFC 5893), plus
+// Punycode. *err is set to 1 when the input has any IDNA error; the output
+// is still produced best-effort. flags select Transitional/STD3/Hyphens/
+// Bidi/Joiners.
 // =======================================================
 
 use "../core/errno.cst"      as errno;
 use "../core/buf.cst"        as buf;
 use "../ucd/tables/idna.cst" as it;
+use "../ucd/tables/joining.cst" as jt;
+use "../ucd/tables/bidi.cst" as bc;
+use "../ucd/props.cst"       as props;
 use "../normalize/normalize.cst" as nz;
 use "../utf/utf8.cst"        as utf8;
 use "./punycode.cst"         as puny;
 
-let is i64 as UTS46_TRANSITIONAL with imut = 1;
-let is i64 as UTS46_USE_STD3     with imut = 2;
+let is i64 as UTS46_TRANSITIONAL  with imut = 1;
+let is i64 as UTS46_USE_STD3      with imut = 2;
+let is i64 as UTS46_CHECK_HYPHENS with imut = 4;
+let is i64 as UTS46_CHECK_BIDI    with imut = 8;
+let is i64 as UTS46_CHECK_JOINERS with imut = 16;
 
-// IDNA status of a code point: 0 valid, 1 mapped, 2 deviation, 3 disallowed, 4 ignored.
 fn idna_status(cp as i32) as i64 {
     let is i32 as idx = it.idna_get(cp);
     return cast(i64, (it.idna_meta_at(idx) >> 28) & 15);
 }
-
 fn _is_sep(cp as i32) as i64 {
-    if (cp == 46 || cp == 12290 || cp == 65294 || cp == 65377) { return 1; }   // . 。 ．｡
+    if (cp == 46 || cp == 12290 || cp == 65294 || cp == 65377) { return 1; }
+    return 0;
+}
+fn _ldh(cp as i32) as i64 {
+    if ((cp >= 97 && cp <= 122) || (cp >= 48 && cp <= 57) || cp == 45) { return 1; }
     return 0;
 }
 
-// Map + NFC into `out`. Returns 0 ok, or 1 if a disallowed cp was present
-// (the char is kept so a best-effort result is still produced).
-fn _map(cps as *i32, n as i64, transitional as i64, out as *buf.CpBuf) as i64 {
-    let is buf.CpBuf as tmp = buf.cpbuf_new(64);
-    let is i64 as err with mut = 0;
-    let is i64 as i with mut = 0;
-    while (i < n) {
-        let is i32 as cp = cps[i];
-        let is i32 as idx = it.idna_get(cp);
-        let is i32 as rec = it.idna_meta_at(idx);
-        let is i64 as st = cast(i64, (rec >> 28) & 15);
-        let is i32 as off = rec & 1048575;
-        let is i32 as ln = (rec >> 20) & 255;
-        if (st == 0) { buf.cpbuf_push(&tmp, cp); }
-        else if (st == 1) { let is i32 as k with mut = 0; while (k < ln) { buf.cpbuf_push(&tmp, it.idna_pool_at(off + k)); k = k + 1; } }
-        else if (st == 2) {
-            if (transitional == 1) { let is i32 as k with mut = 0; while (k < ln) { buf.cpbuf_push(&tmp, it.idna_pool_at(off + k)); k = k + 1; } }
-            else { buf.cpbuf_push(&tmp, cp); }
-        }
-        else if (st == 3) { buf.cpbuf_push(&tmp, cp); err = 1; }
-        // st == 4 (ignored): drop
-        i = i + 1;
+// Map one code point into `tmp`. Mapped targets are processed recursively
+// (e.g. ẞ -> ß, and ß is a deviation that maps to "ss" in transitional mode).
+fn _map_one(cp as i32, transitional as i64, tmp as *buf.CpBuf, err as *i64) as void {
+    let is i32 as rec = it.idna_meta_at(it.idna_get(cp));
+    let is i64 as st = cast(i64, (rec >> 28) & 15);
+    let is i32 as off = rec & 1048575;
+    let is i32 as ln = (rec >> 20) & 255;
+    if (st == 0) { buf.cpbuf_push(tmp, cp); }
+    else if (st == 1) { let is i32 as k with mut = 0; while (k < ln) { _map_one(it.idna_pool_at(off + k), transitional, tmp, err); k = k + 1; } }
+    else if (st == 2) {
+        if (transitional == 1) { let is i32 as k with mut = 0; while (k < ln) { buf.cpbuf_push(tmp, it.idna_pool_at(off + k)); k = k + 1; } }
+        else { buf.cpbuf_push(tmp, cp); }
     }
+    else if (st == 3) { buf.cpbuf_push(tmp, cp); err[0] = 1; }
+    // st == 4 (ignored): drop
+}
+
+// Map + NFC into `out`. Sets *err on a disallowed code point.
+fn _map(cps as *i32, n as i64, transitional as i64, out as *buf.CpBuf, err as *i64) as void {
+    let is buf.CpBuf as tmp = buf.cpbuf_new(64);
+    let is i64 as i with mut = 0;
+    while (i < n) { _map_one(cps[i], transitional, &tmp, err); i = i + 1; }
     nz.nfc(tmp.ptr, tmp.len, out);
     buf.cpbuf_free(&tmp);
-    return err;
 }
 
-fn _label_is_xn(lab as *i32, n as i64) as i64 {
-    if (n < 4) { return 0; }
-    if (lab[0] == 120 && lab[1] == 110 && lab[2] == 45 && lab[3] == 45) { return 1; }   // "xn--"
+fn _is_bidi_domain(cps as *i32, n as i64) as i64 {
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i64 as b = props.bidi_class(cps[i]);
+        if (b == bc.BIDI_R || b == bc.BIDI_AL || b == bc.BIDI_AN) { return 1; }
+        i = i + 1;
+    }
     return 0;
 }
-fn _label_all_ascii(lab as *i32, n as i64) as i64 {
-    let is i64 as i with mut = 0;
-    while (i < n) { if (lab[i] > 127) { return 0; } i = i + 1; }
-    return 1;
-}
 
-// to_ascii: append the A-label form to `out`. Returns byte count, or 0 - UERR_*.
-fn to_ascii(src as *u8, n as i64, flags as i64, out as *buf.ByteBuf) as i64 {
-    let is i64 as trans = flags & 1;
-    let is buf.CpBuf as incp = buf.cpbuf_new(64);
-    if (utf8.to_cps(src, n, &incp) < 0) { buf.cpbuf_free(&incp); return 0 - errno.UERR_INVALID; }
-    let is buf.CpBuf as mp = buf.cpbuf_new(64);
-    let is i64 as merr = _map(incp.ptr, incp.len, trans, &mp);
-    let is i64 as err with mut = merr;
-
-    let is buf.CpBuf as lab = buf.cpbuf_new(32);
-    let is i64 as base = out.len;
-    let is i64 as first with mut = 1;
+// ContextJ (RFC 5892 A.1/A.2) for a label. Returns 1 on violation.
+fn _contextj(lab as *i32, n as i64) as i64 {
     let is i64 as i with mut = 0;
-    let is i64 as done with mut = 0;
-    while (done == 0) {
-        let is i64 as atend with mut = 0;
-        let is i64 as issep with mut = 0;
-        if (i >= mp.len) { atend = 1; }
-        else if (_is_sep(mp.ptr[i]) == 1) { issep = 1; }
-        if (atend == 1 || issep == 1) {
-            if (first == 0) { buf.bytebuf_push(out, cast(u8, 46)); }
-            first = 0;
-            if (_label_all_ascii(lab.ptr, lab.len) == 1) {
-                let is i64 as q with mut = 0;
-                while (q < lab.len) { buf.bytebuf_push(out, cast(u8, lab.ptr[q])); q = q + 1; }
-            } else {
-                buf.bytebuf_push(out, cast(u8, 120)); buf.bytebuf_push(out, cast(u8, 110));
-                buf.bytebuf_push(out, cast(u8, 45)); buf.bytebuf_push(out, cast(u8, 45));
-                if (puny.punycode_encode(lab.ptr, lab.len, out) < 0) { err = 1; }
+    while (i < n) {
+        let is i32 as cp = lab[i];
+        if (cp == 8205) {                                    // ZWJ U+200D
+            if (i == 0 || props.combining_class(lab[i - 1]) != 9) { return 1; }
+        } else if (cp == 8204) {                             // ZWNJ U+200C
+            if (i > 0 && props.combining_class(lab[i - 1]) == 9) { }
+            else {
+                let is i64 as j with mut = i - 1;
+                while (j >= 0 && cast(i64, jt.joining_get(lab[j])) == 5) { j = j - 1; }   // skip T
+                if (j < 0) { return 1; }
+                let is i64 as jb = cast(i64, jt.joining_get(lab[j]));
+                if (jb != 2 && jb != 3) { return 1; }        // need D or L
+                let is i64 as k with mut = i + 1;
+                while (k < n && cast(i64, jt.joining_get(lab[k])) == 5) { k = k + 1; }
+                if (k >= n) { return 1; }
+                let is i64 as je = cast(i64, jt.joining_get(lab[k]));
+                if (je != 2 && je != 4) { return 1; }        // need D or R
             }
-            buf.cpbuf_reset(&lab);
-            if (atend == 1) { done = 1; }
-        } else {
-            buf.cpbuf_push(&lab, mp.ptr[i]);
         }
         i = i + 1;
     }
-    buf.cpbuf_free(&incp); buf.cpbuf_free(&mp); buf.cpbuf_free(&lab);
-    if (err == 1) { return 0 - errno.UERR_DISALLOWED; }
-    return out.len - base;
+    return 0;
 }
 
-// to_unicode: append the U-label form (UTF-8) to `out`. Returns byte count.
-fn to_unicode(src as *u8, n as i64, flags as i64, out as *buf.ByteBuf) as i64 {
+// Bidi rule (RFC 5893) for a label. Returns 1 on violation.
+fn _bidi_label(lab as *i32, n as i64) as i64 {
+    if (n == 0) { return 0; }
+    let is i64 as d0 = props.bidi_class(lab[0]);
+    let is i64 as rtl with mut = 0;
+    if (d0 == bc.BIDI_R || d0 == bc.BIDI_AL) { rtl = 1; }
+    else if (d0 == bc.BIDI_L) { rtl = 0; }
+    else { return 1; }
+    let is i64 as saw_en with mut = 0;
+    let is i64 as saw_an with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i64 as b = props.bidi_class(lab[i]);
+        if (rtl == 1) {
+            if (b == bc.BIDI_R || b == bc.BIDI_AL || b == bc.BIDI_AN || b == bc.BIDI_EN || b == bc.BIDI_ES
+                || b == bc.BIDI_CS || b == bc.BIDI_ET || b == bc.BIDI_ON || b == bc.BIDI_BN || b == bc.BIDI_NSM) {
+                if (b == bc.BIDI_EN) { saw_en = 1; }
+                if (b == bc.BIDI_AN) { saw_an = 1; }
+            } else { return 1; }
+        } else {
+            if (b == bc.BIDI_L || b == bc.BIDI_EN || b == bc.BIDI_ES || b == bc.BIDI_CS
+                || b == bc.BIDI_ET || b == bc.BIDI_ON || b == bc.BIDI_BN || b == bc.BIDI_NSM) { }
+            else { return 1; }
+        }
+        i = i + 1;
+    }
+    if (rtl == 1 && saw_en == 1 && saw_an == 1) { return 1; }
+    // trailing char excluding NSM
+    let is i64 as j with mut = n - 1;
+    while (j >= 0 && props.bidi_class(lab[j]) == bc.BIDI_NSM) { j = j - 1; }
+    if (j < 0) { return 1; }
+    let is i64 as lc = props.bidi_class(lab[j]);
+    if (rtl == 1) { if (lc != bc.BIDI_R && lc != bc.BIDI_AL && lc != bc.BIDI_EN && lc != bc.BIDI_AN) { return 1; } }
+    else { if (lc != bc.BIDI_L && lc != bc.BIDI_EN) { return 1; } }
+    return 0;
+}
+
+// Validate one label. Returns 1 on any error.
+fn _label_valid(lab as *i32, n as i64, transitional as i64, flags as i64, is_bidi as i64) as i64 {
+    if (n == 0) { return 0; }
+    // V1: must be NFC
+    let is buf.CpBuf as nf = buf.cpbuf_new(16);
+    nz.nfc(lab, n, &nf);
+    let is i64 as same with mut = 1;
+    if (nf.len != n) { same = 0; }
+    else { let is i64 as q with mut = 0; while (q < n) { if (nf.ptr[q] != lab[q]) { same = 0; q = n; } else { q = q + 1; } } }
+    buf.cpbuf_free(&nf);
+    if (same == 0) { return 1; }
+    // V2/V3: hyphens
+    if ((flags & UTS46_CHECK_HYPHENS) != 0) {
+        if (lab[0] == 45 || lab[n - 1] == 45) { return 1; }
+        if (n >= 4 && lab[2] == 45 && lab[3] == 45) { return 1; }
+    }
+    // V5: no leading combining mark (general category Mn, Mc, or Me)
+    let is i64 as g0 = props.general_category(lab[0]);
+    if (g0 == props.GC_MN || g0 == props.GC_MC || g0 == props.GC_ME) { return 1; }
+    // V6: valid code points (+ STD3)
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i32 as cp = lab[i];
+        let is i64 as st = idna_status(cp);
+        if (st == 1 || st == 3 || st == 4) { return 1; }
+        if (st == 2 && transitional == 1) { return 1; }
+        if ((flags & UTS46_USE_STD3) != 0 && cp < 128 && _ldh(cp) == 0) { return 1; }
+        i = i + 1;
+    }
+    if ((flags & UTS46_CHECK_JOINERS) != 0) { if (_contextj(lab, n) == 1) { return 1; } }
+    if ((flags & UTS46_CHECK_BIDI) != 0 && is_bidi == 1) { if (_bidi_label(lab, n) == 1) { return 1; } }
+    return 0;
+}
+
+// Processing: map+NFC, split labels, decode xn-- labels, validate. Produces
+// the processed Unicode (labels joined by '.') into `out`; sets *err.
+fn _process(src as *u8, n as i64, flags as i64, out as *buf.CpBuf, err as *i64) as void {
     let is i64 as trans = flags & 1;
     let is buf.CpBuf as incp = buf.cpbuf_new(64);
-    if (utf8.to_cps(src, n, &incp) < 0) { buf.cpbuf_free(&incp); return 0 - errno.UERR_INVALID; }
+    if (utf8.to_cps(src, n, &incp) < 0) { err[0] = 1; buf.cpbuf_free(&incp); return; }
     let is buf.CpBuf as mp = buf.cpbuf_new(64);
-    _map(incp.ptr, incp.len, trans, &mp);
+    _map(incp.ptr, incp.len, trans, &mp, err);
 
     let is buf.CpBuf as lab = buf.cpbuf_new(32);
     let is buf.CpBuf as dec = buf.cpbuf_new(32);
-    let is i64 as base = out.len;
     let is i64 as first with mut = 1;
     let is i64 as i with mut = 0;
     let is i64 as done with mut = 0;
     while (done == 0) {
         let is i64 as atend with mut = 0;
-        let is i64 as issep with mut = 0;
         if (i >= mp.len) { atend = 1; }
-        else if (_is_sep(mp.ptr[i]) == 1) { issep = 1; }
+        let is i64 as issep with mut = 0;
+        if (atend == 0 && _is_sep(mp.ptr[i]) == 1) { issep = 1; }
         if (atend == 1 || issep == 1) {
-            if (first == 0) { buf.bytebuf_push(out, cast(u8, 46)); }
+            if (first == 0) { buf.cpbuf_push(out, 46); }
             first = 0;
-            if (_label_is_xn(lab.ptr, lab.len) == 1) {
-                // decode the part after "xn--": copy label[4..] to ascii bytes
+            let is i64 as ltrans with mut = trans;
+            let is *i32 as lp with mut = lab.ptr;
+            let is i64 as ln with mut = lab.len;
+            if (lab.len >= 4 && lab.ptr[0] == 120 && lab.ptr[1] == 110 && lab.ptr[2] == 45 && lab.ptr[3] == 45) {
+                // xn-- : decode the rest
                 let is buf.ByteBuf as ab = buf.bytebuf_new(32);
                 let is i64 as q with mut = 4;
                 while (q < lab.len) { buf.bytebuf_push(&ab, cast(u8, lab.ptr[q])); q = q + 1; }
                 buf.cpbuf_reset(&dec);
-                if (puny.punycode_decode(ab.ptr, ab.len, &dec) >= 0) {
-                    utf8.from_cps(dec.ptr, dec.len, out);
-                } else {
-                    utf8.from_cps(lab.ptr, lab.len, out);   // leave as-is on failure
+                if (puny.punycode_decode(ab.ptr, ab.len, &dec) < 0) { err[0] = 1; }
+                else {
+                    lp = dec.ptr; ln = dec.len; ltrans = 0;
+                    if (dec.len == 0) { err[0] = 1; }
+                    else { let is i64 as na with mut = 0; let is i64 as z with mut = 0; while (z < dec.len) { if (dec.ptr[z] > 127) { na = 1; z = dec.len; } else { z = z + 1; } } if (na == 0) { err[0] = 1; } }
                 }
                 buf.bytebuf_free(&ab);
-            } else {
-                utf8.from_cps(lab.ptr, lab.len, out);
+            }
+            let is i64 as q2 with mut = 0;
+            while (q2 < ln) { buf.cpbuf_push(out, lp[q2]); q2 = q2 + 1; }
+            buf.cpbuf_reset(&lab);
+            if (atend == 1) { done = 1; }
+        } else { buf.cpbuf_push(&lab, mp.ptr[i]); }
+        i = i + 1;
+    }
+    // pass 2: validate each decoded label (non-transitional; mapping already
+    // applied the transitional choice). Bidi-domain status from decoded form.
+    let is i64 as is_bidi = _is_bidi_domain(out.ptr, out.len);
+    let is i64 as ls with mut = 0;
+    let is i64 as k with mut = 0;
+    while (k <= out.len) {
+        let is i64 as atb with mut = 0;
+        if (k == out.len) { atb = 1; } else if (out.ptr[k] == 46) { atb = 1; }
+        if (atb == 1) {
+            if (k - ls == 0 && k < out.len) { err[0] = 1; }   // empty non-root label
+            if (_label_valid(cast(*i32, cast(i64, out.ptr) + ls * 4), k - ls, 0, flags, is_bidi) == 1) { err[0] = 1; }
+            ls = k + 1;
+        }
+        k = k + 1;
+    }
+    buf.cpbuf_free(&incp); buf.cpbuf_free(&mp); buf.cpbuf_free(&lab); buf.cpbuf_free(&dec);
+}
+
+// ToUnicode: append the processed U-label form (UTF-8). *err set on error.
+fn to_unicode(src as *u8, n as i64, flags as i64, out as *buf.ByteBuf, err as *i64) as i64 {
+    err[0] = 0;
+    let is buf.CpBuf as u = buf.cpbuf_new(64);
+    _process(src, n, flags, &u, err);
+    let is i64 as r = utf8.from_cps(u.ptr, u.len, out);
+    buf.cpbuf_free(&u);
+    return r;
+}
+
+// ToASCII: append the A-label form. *err set on error.
+fn to_ascii(src as *u8, n as i64, flags as i64, out as *buf.ByteBuf, err as *i64) as i64 {
+    err[0] = 0;
+    let is buf.CpBuf as u = buf.cpbuf_new(64);
+    _process(src, n, flags, &u, err);
+    // split processed Unicode on '.', encode each non-ASCII label to xn--
+    let is i64 as base = out.len;
+    let is buf.CpBuf as lab = buf.cpbuf_new(32);
+    let is i64 as first with mut = 1;
+    let is i64 as i with mut = 0;
+    let is i64 as done with mut = 0;
+    while (done == 0) {
+        let is i64 as atend with mut = 0;
+        if (i >= u.len) { atend = 1; }
+        let is i64 as issep with mut = 0;
+        if (atend == 0 && u.ptr[i] == 46) { issep = 1; }
+        if (atend == 1 || issep == 1) {
+            if (first == 0) { buf.bytebuf_push(out, cast(u8, 46)); }
+            first = 0;
+            let is i64 as allascii with mut = 1;
+            let is i64 as q with mut = 0;
+            while (q < lab.len) { if (lab.ptr[q] > 127) { allascii = 0; q = lab.len; } else { q = q + 1; } }
+            if (allascii == 1) { q = 0; while (q < lab.len) { buf.bytebuf_push(out, cast(u8, lab.ptr[q])); q = q + 1; } }
+            else {
+                buf.bytebuf_push(out, cast(u8, 120)); buf.bytebuf_push(out, cast(u8, 110));
+                buf.bytebuf_push(out, cast(u8, 45)); buf.bytebuf_push(out, cast(u8, 45));
+                if (puny.punycode_encode(lab.ptr, lab.len, out) < 0) { err[0] = 1; }
             }
             buf.cpbuf_reset(&lab);
             if (atend == 1) { done = 1; }
-        } else {
-            buf.cpbuf_push(&lab, mp.ptr[i]);
-        }
+        } else { buf.cpbuf_push(&lab, u.ptr[i]); }
         i = i + 1;
     }
-    buf.cpbuf_free(&incp); buf.cpbuf_free(&mp); buf.cpbuf_free(&lab); buf.cpbuf_free(&dec);
+    // A4_1/A4_2: DNS length limits on the A-label output (label 1..63, total <=253)
+    if (out.len - base > 253) { err[0] = 1; }
+    if (out.len == base) { err[0] = 1; }                              // A4_1: empty domain
+    let is i64 as ll with mut = 0;
+    let is i64 as z with mut = base;
+    while (z <= out.len) {
+        if (z == out.len || out.ptr[z] == 46) {
+            if (ll > 63 || (ll == 0 && out.len > base)) { err[0] = 1; }   // A4_2: 1..63
+            ll = 0;
+        } else { ll = ll + 1; }
+        z = z + 1;
+    }
+    buf.cpbuf_free(&u); buf.cpbuf_free(&lab);
     return out.len - base;
 }
