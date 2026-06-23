@@ -12,6 +12,16 @@ target "test_ucd" {
     out "build/test_ucd"
 }
 
+target "test_utf" {
+    src "tests/test_utf.cst"
+    out "build/test_utf"
+}
+
+target "test_width" {
+    src "tests/test_width.cst"
+    out "build/test_width"
+}
+
 script "test" {
     "bash tests/run.sh"
 }

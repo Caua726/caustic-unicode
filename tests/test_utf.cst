@@ -1,0 +1,72 @@
+// =======================================================
+// tests/test_utf.cst — UTF-8/16/32 encode/decode/validate round-trips,
+// malformed-input rejection, index conversions, bulk convert.
+// Exit 0 = pass; non-zero = the numbered check that failed.
+// =======================================================
+
+use "../utf/utf8.cst"  as utf8;
+use "../utf/utf16.cst" as utf16;
+use "../utf/utf32.cst" as utf32;
+use "../core/buf.cst"  as buf;
+use "../core/errno.cst" as errno;
+
+fn main() as i32 {
+    let is [4]u8 as tmp;
+    let is i32 as cp with mut = 0;
+
+    // encode lengths: ASCII / 2 / 3 / 4 byte
+    if (utf8.encode1(65, cast(*u8, &tmp)) != 1)       { return 1; }   // 'A'
+    if (tmp[0] != 65)                                 { return 2; }
+    if (utf8.encode1(233, cast(*u8, &tmp)) != 2)      { return 3; }   // é U+00E9
+    if (utf8.decode1(cast(*u8, &tmp), 2, 0, &cp) != 2 || cp != 233)    { return 4; }
+    if (utf8.encode1(8364, cast(*u8, &tmp)) != 3)     { return 5; }   // € U+20AC
+    if (utf8.decode1(cast(*u8, &tmp), 3, 0, &cp) != 3 || cp != 8364)   { return 6; }
+    if (utf8.encode1(128512, cast(*u8, &tmp)) != 4)   { return 7; }   // 😀 U+1F600
+    if (utf8.decode1(cast(*u8, &tmp), 4, 0, &cp) != 4 || cp != 128512) { return 8; }
+
+    // malformed rejection
+    if (utf8.encode1(55296, cast(*u8, &tmp)) >= 0)    { return 9; }   // encode surrogate
+    let is [2]u8 as ov; ov[0] = 192; ov[1] = 128;                      // overlong NUL C0 80
+    if (utf8.decode1(cast(*u8, &ov), 2, 0, &cp) >= 0) { return 10; }
+    let is [1]u8 as tr; tr[0] = 226;                                   // 3-byte lead, truncated
+    if (utf8.decode1(cast(*u8, &tr), 1, 0, &cp) != (0 - errno.UERR_TRUNC)) { return 11; }
+    let is [3]u8 as sg; sg[0] = 237; sg[1] = 160; sg[2] = 128;         // ED A0 80 = U+D800
+    if (utf8.decode1(cast(*u8, &sg), 3, 0, &cp) >= 0) { return 12; }
+
+    // validate + count: "héllo€" = 9 bytes, 6 cps
+    let is *u8 as s = "h\xC3\xA9llo\xE2\x82\xAC";
+    if (utf8.validate(s, 9) != 0)  { return 13; }
+    if (utf8.count(s, 9)    != 6)  { return 14; }
+
+    // to_cps / from_cps round-trip
+    let is buf.CpBuf as cps = buf.cpbuf_new(8);
+    if (utf8.to_cps(s, 9, &cps) != 6)            { return 15; }
+    if (buf.cpbuf_get(&cps, 1) != 233)           { return 16; }   // é
+    if (buf.cpbuf_get(&cps, 5) != 8364)          { return 17; }   // €
+    let is buf.ByteBuf as bb = buf.bytebuf_new(16);
+    if (utf8.from_cps(cps.ptr, cps.len, &bb) != 9) { return 18; }
+    if (bb.ptr[0] != 104)                        { return 19; }   // 'h'
+    buf.cpbuf_free(&cps);
+    buf.bytebuf_free(&bb);
+
+    // index conversions: cp 5 ('€') starts at byte 6
+    if (utf8.cp_to_byte_index(s, 9, 5) != 6) { return 20; }
+    if (utf8.byte_to_cp_index(s, 9, 6) != 5) { return 21; }
+
+    // UTF-16 surrogate pair + BMP
+    let is [2]u16 as u16b;
+    if (utf16.encode1(128512, cast(*u16, &u16b)) != 2)              { return 22; }
+    if (utf16.decode1(cast(*u16, &u16b), 2, 0, &cp) != 2 || cp != 128512) { return 23; }
+    if (utf16.encode1(65, cast(*u16, &u16b)) != 1)                  { return 24; }
+
+    // UTF-32 validate rejects a surrogate
+    let is [1]i32 as u32b; u32b[0] = 55296;
+    if (utf32.validate(cast(*i32, &u32b), 1) >= 0) { return 25; }
+
+    // iterator
+    let is utf8.Utf8Iter as it = utf8.iter(s, 9);
+    if (utf8.iter_next(&it) != 104) { return 26; }   // 'h'
+    if (utf8.iter_next(&it) != 233) { return 27; }   // é
+
+    return 0;
+}

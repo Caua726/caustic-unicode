@@ -1,0 +1,31 @@
+// =======================================================
+// tests/test_width.cst — display widths (narrow/wide/zero).
+// Exit 0 = pass; non-zero = the numbered check that failed.
+// =======================================================
+
+use "../width/width.cst" as width;
+
+fn main() as i32 {
+    if (width.cp_width(65)      != 1) { return 1; }   // 'A' narrow
+    if (width.cp_width(19968)   != 2) { return 2; }   // U+4E00 CJK wide
+    if (width.cp_width(769)     != 0) { return 3; }   // U+0301 combining
+    if (width.cp_width(9)       != 0) { return 4; }   // tab (Cc)
+    if (width.cp_width(128512)  != 2) { return 5; }   // U+1F600 emoji (Wide)
+    if (width.cp_width(65313)   != 2) { return 6; }   // U+FF21 fullwidth A
+    if (width.cp_width(0x200D)  != 0) { return 7; }   // ZWJ (Cf)
+
+    // string "A中" = 1 + 2 = 3 (bytes: 'A' + U+4E2D)
+    let is *u8 as s = "A\xE4\xB8\xAD";
+    if (width.string_width(s, 4) != 3) { return 8; }
+
+    // run width: 'A'(1) + U+4E00(2) + combining(0) = 3
+    let is [3]i32 as run;
+    run[0] = 65; run[1] = 19968; run[2] = 769;
+    if (width.cp_run_width(cast(*i32, &run), 3) != 3) { return 9; }
+
+    // ambiguous: U+00A1 (¡) is East-Asian Ambiguous -> 1 normally, 2 in CJK ctx
+    if (width.cp_width_amb(161, 0) != 1) { return 10; }
+    if (width.cp_width_amb(161, 1) != 2) { return 11; }
+
+    return 0;
+}

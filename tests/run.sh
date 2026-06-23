@@ -33,8 +33,10 @@ else
     echo "COMPILE FAIL"; tail -8 build/facade.log | sed 's/^/    /'; fail=1
 fi
 
-run_case test_buf tests/test_buf.cst
-run_case test_ucd tests/test_ucd.cst
+run_case test_buf   tests/test_buf.cst
+run_case test_ucd   tests/test_ucd.cst
+run_case test_utf   tests/test_utf.cst
+run_case test_width tests/test_width.cst
 
 if [ "$fail" -eq 0 ]; then echo "all green"; else echo "FAILURES"; fi
 exit $fail
