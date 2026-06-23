@@ -1,0 +1,6 @@
+// =======================================================
+// caustic-unicode/segment — text segmentation (UAX #29), subtree facade.
+// grapheme clusters, words, sentences.
+// =======================================================
+
+use "grapheme.cst" as grapheme;

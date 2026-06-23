@@ -6,9 +6,11 @@
 // segment module in a later phase.)
 // =======================================================
 
-use "../ucd/props.cst"      as props;
-use "../ucd/tables/eaw.cst" as eaw;
-use "../utf/utf8.cst"       as utf8;
+use "../ucd/props.cst"        as props;
+use "../ucd/tables/eaw.cst"   as eaw;
+use "../utf/utf8.cst"         as utf8;
+use "../core/buf.cst"         as buf;
+use "../segment/grapheme.cst" as gr;
 
 // Columns occupied by one code point: 0, 1, or 2.
 fn cp_width(cp as i32) as i64 {
@@ -29,27 +31,35 @@ fn cp_width_amb(cp as i32, ambiguous_wide as i64) as i64 {
     return w;
 }
 
-// Sum of cp_width over a code-point run.
+// Grapheme-cluster-aware run width: each cluster contributes the max cp_width
+// of its members, so a base+combining sequence counts as the base and an
+// emoji ZWJ sequence counts as 2 (not the sum of its parts).
 fn cp_run_width(cps as *i32, n as i64) as i64 {
     let is i64 as total with mut = 0;
-    let is i64 as i with mut = 0;
-    while (i < n) {
-        total = total + cp_width(cps[i]);
-        i = i + 1;
+    let is gr.GraphemeIter as it = gr.grapheme_iter(cps, n);
+    let is i64 as start with mut = 0;
+    let is i64 as e with mut = gr.grapheme_next(&it);
+    while (e >= 0) {
+        let is i64 as w with mut = 0;
+        let is i64 as j with mut = start;
+        while (j < e) {
+            let is i64 as cw = cp_width(cps[j]);
+            if (cw > w) { w = cw; }
+            j = j + 1;
+        }
+        total = total + w;
+        start = e;
+        e = gr.grapheme_next(&it);
     }
     return total;
 }
 
-// Display width of a UTF-8 string. Returns >= 0, or 0 - UERR_* on bad UTF-8.
+// Display width of a UTF-8 string (grapheme-cluster aware). Returns >= 0, or
+// 0 - UERR_* on bad UTF-8.
 fn string_width(src as *u8, n as i64) as i64 {
-    let is i64 as total with mut = 0;
-    let is i64 as i with mut = 0;
-    let is i32 as cp with mut = 0;
-    while (i < n) {
-        let is i64 as k = utf8.decode1(src, n, i, &cp);
-        if (k < 0) { return k; }
-        total = total + cp_width(cp);
-        i = i + k;
-    }
-    return total;
+    let is buf.CpBuf as cps = buf.cpbuf_new(64);
+    if (utf8.to_cps(src, n, &cps) < 0) { buf.cpbuf_free(&cps); return 0 - 1; }
+    let is i64 as w = cp_run_width(cps.ptr, cps.len);
+    buf.cpbuf_free(&cps);
+    return w;
 }

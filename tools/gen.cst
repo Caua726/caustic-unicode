@@ -1245,6 +1245,72 @@ fn gen_special() as i32 {
     return 0;
 }
 
+// ---- Indic_Conjunct_Break (DerivedCoreProperties.txt, "InCB") for GB9c ----
+// 3-field lines "RANGE ; InCB ; Value". Value -> 1 Consonant, 2 Extend, 3 Linker.
+fn gen_incb() as i32 {
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as len with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/DerivedCoreProperties.txt", &len);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as pos with mut = 0;
+    while (pos < len) {
+        let is i32 as le = line_end(p, len, pos);
+        let is i32 as llen = le - pos;
+        if (llen > 0 && p[pos] != 35) {
+            let is *u8 as lp = cast(*u8, cast(i64, p) + pos);
+            let is i32 as f1e with mut = 0;
+            let is i32 as f1s = field(lp, llen, 1, &f1e);
+            if (f1s >= 0) {
+                let is i32 as vs1 with mut = f1s;
+                let is i32 as ve1 with mut = f1e;
+                while (vs1 < ve1 && (lp[vs1] == 32 || lp[vs1] == 9)) { vs1 = vs1 + 1; }
+                while (ve1 > vs1 && (lp[ve1 - 1] == 32 || lp[ve1 - 1] == 9)) { ve1 = ve1 - 1; }
+                if (slice_eq(lp, vs1, ve1, "InCB") == 1) {
+                    let is i32 as f2e with mut = 0;
+                    let is i32 as f2s = field(lp, llen, 2, &f2e);
+                    let is i32 as vs with mut = f2s;
+                    let is i32 as ve with mut = f2e;
+                    let is i32 as hh = find_char(lp, vs, f2e, 35);
+                    if (hh >= 0) { ve = hh; }
+                    while (vs < ve && (lp[vs] == 32 || lp[vs] == 9)) { vs = vs + 1; }
+                    while (ve > vs && (lp[ve - 1] == 32 || lp[ve - 1] == 9 || lp[ve - 1] == 13)) { ve = ve - 1; }
+                    let is i32 as val with mut = 0;
+                    if (slice_eq(lp, vs, ve, "Consonant") == 1) { val = 1; }
+                    if (slice_eq(lp, vs, ve, "Extend") == 1) { val = 2; }
+                    if (slice_eq(lp, vs, ve, "Linker") == 1) { val = 3; }
+                    if (val > 0) {
+                        let is i32 as f0e with mut = 0;
+                        let is i32 as f0s = field(lp, llen, 0, &f0e);
+                        let is i32 as lo with mut = 0;
+                        let is i32 as hi with mut = 0;
+                        parse_range(lp, f0s, f0e, &lo, &hi);
+                        if (lo >= 0 && hi >= lo && hi < NUMCP) {
+                            let is i32 as c with mut = lo;
+                            while (c <= hi) { flat[c] = cast(u16, val); c = c + 1; }
+                        }
+                    }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    io.write_str(1, "incb:");
+    return build_and_emit("ucd/tables/incb.cst", "incb", "INCB", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+}
+
+// ---- Extended_Pictographic (emoji-data.txt) for grapheme/word breaking ----
+fn gen_extpict() as i32 {
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as l with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/emoji-data.txt", &l);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    mark_prop(p, l, "Extended_Pictographic", 1, flat);
+    io.write_str(1, "extpict:");
+    return build_and_emit("ucd/tables/extpict.cst", "extpict", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+}
+
 fn main() as i32 {
     if (gen_gc() < 0)  { return 1; }
     if (gen_ccc() < 0) { return 2; }
@@ -1261,6 +1327,8 @@ fn main() as i32 {
     if (gen_case_simple() < 0) { return 13; }
     if (gen_fold() < 0) { return 14; }
     if (gen_special() < 0) { return 15; }
+    if (gen_extpict() < 0) { return 16; }
+    if (gen_incb() < 0) { return 17; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }
