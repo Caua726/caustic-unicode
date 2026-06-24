@@ -117,10 +117,10 @@ syscalls and no platform `#if`s, so it runs anywhere Caustic targets — Linux,
 macOS, Windows. The only hardware assumption is **little-endian** (x86-64,
 ARM64, …), because the generated tables are stored as little-endian blobs.
 
-The tooling is portable too: the test runner, downloader, and generator use the
-cross-platform `std/process` and `std/io` abstractions (the runner dispatches
-per OS exactly as `std/process` does internally). `fetch.cst` shells out to
-`curl`, the one external program it needs.
+The tooling is portable too: the test runner, downloader, and generator use
+only the cross-platform std facades (`std/process`, `std/io`, `std/os`,
+`std/env`) — never a per-OS module. `fetch.cst` shells out to `curl`, the one
+external program it needs.
 
 ## Status
 

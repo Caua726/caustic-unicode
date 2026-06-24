@@ -1,17 +1,16 @@
 // =======================================================
-// tests/run.cst — the test runner, in Caustic. Portable across targets via
-// the std abstractions (mirrors how std/process itself dispatches per OS).
+// tests/run.cst — the test runner, in Caustic. Portable: it uses only the
+// std portability facades (process / io / os / env), never a per-OS module.
 // Compiles and runs every test + conformance suite, checks exit codes, and
 // prints a PASS/FAIL line for each. Exits 0 iff everything is green.
 // Run from the repo root:  caustic tests/run.cst -o build/run && ./build/run
 // =======================================================
 
 use "std/process.cst" as proc;
+use "std/io.cst"       as io;
 use "std/os.cst"       as os;
 use "std/env.cst"      as env;
-use "std/io.cst"       as io;
 use "std/string.cst"   as str;
-if (__target_is_linux + __compat_mode) use "std/os/linux.cst" as linux;
 
 fn app(buf as *u8, pos as i64, s as *u8) as i64 {
     let is i64 as p with mut = pos;
@@ -31,28 +30,42 @@ fn label(name as *u8) as void {
     while (pad > 0) { io.write_str(1, " "); pad = pad - 1; }
 }
 
-// Run `caustic argv...` with its output suppressed (the compiler is chatty and
-// writes to stderr). On Linux we fork and send stdout+stderr to /dev/null; on
-// other targets std/process.capture swallows the child's output. Compile
-// success is checked by the caller via io.exists on the output path.
-fn caustic_quiet(argv as *u8) as void {
-    if (os.current() == os.OS_LINUX) {
-        let is i64 as devnull = linux.open("/dev/null", linux.O_WRONLY, 0);
-        let is i64 as pid = linux.fork();
-        if (pid == 0) {
-            if (devnull >= 0) { linux.dup2(devnull, 1); linux.dup2(devnull, 2); }
-            env.execvp("caustic", argv);
-            linux.exit(127);
-        }
-        if (devnull >= 0) { linux.close(devnull); }
-        proc.wait_pid(pid);
-        return;
+// Resolve `file` against $PATH into out (proc.capture runs via execve, which
+// needs a real path). Tries a bare name and a .exe suffix. Returns 1 if found.
+fn which(file as *u8, out as *u8) as i32 {
+    let is *u8 as path = env.getenv("PATH");
+    if (cast(i64, path) == 0) { return 0; }
+    let is i64 as i with mut = 0;
+    while (path[i] != 0) {
+        let is i64 as start = i;
+        while (path[i] != 0 && path[i] != 58 && path[i] != 59) { i = i + 1; }   // ':' or ';'
+        let is i64 as q with mut = 0;
+        let is i64 as k with mut = start;
+        while (k < i) { out[q] = path[k]; q = q + 1; k = k + 1; }
+        out[q] = cast(u8, 47); q = q + 1;                                       // '/'
+        q = app(out, q, file);
+        out[q] = cast(u8, 0);
+        if (io.exists(out) == 1) { return 1; }
+        out[q] = cast(u8, 46); out[q + 1] = cast(u8, 101);
+        out[q + 2] = cast(u8, 120); out[q + 3] = cast(u8, 101); out[q + 4] = cast(u8, 0);   // ".exe"
+        if (io.exists(out) == 1) { return 1; }
+        if (path[i] != 0) { i = i + 1; }
     }
-    let is str.String as log = proc.capture("caustic", argv);   // other OSes: capture discards output
+    return 0;
 }
 
-// Compile src to build/<name>, then run it. Returns 0 on pass, 1 on failure.
-fn run_case(name as *u8, src as *u8) as i32 {
+// Send this process's stderr to the null device, so children inherit a quiet
+// stderr. proc.capture already swallows a child's stdout (and on Windows its
+// stderr too); this covers the one case it doesn't: a child's stderr on POSIX.
+// Done with the io facade only (close fd 2, reopen — the new fd reuses 2).
+fn silence_stderr() as void {
+    let is *u8 as nul with mut = "/dev/null";
+    if (os.current() == os.OS_WINDOWS) { return; }   // Windows: capture redirects both streams
+    io._close_fd(2);
+    io._open_write(nul);
+}
+
+fn run_case(cc as *u8, name as *u8, src as *u8) as i32 {
     let is [256]u8 as out;
     let is i64 as p with mut = app(cast(*u8, &out), 0, "build/");
     p = app(cast(*u8, &out), p, name);
@@ -64,7 +77,7 @@ fn run_case(name as *u8, src as *u8) as i32 {
     let is [5]i64 as cav;
     cav[0] = cast(i64, "caustic"); cav[1] = cast(i64, src);
     cav[2] = cast(i64, "-o"); cav[3] = cast(i64, cast(*u8, &out)); cav[4] = 0;
-    caustic_quiet(cast(*u8, &cav));
+    let is str.String as log = proc.capture(cc, cast(*u8, &cav));   // swallow compiler output
 
     if (io.exists(cast(*u8, &out)) == 0) { io.write_str(1, "COMPILE FAIL\n"); return 1; }
 
@@ -78,26 +91,30 @@ fn run_case(name as *u8, src as *u8) as i32 {
 }
 
 fn main(argc as i64, argv as *u8) as i32 {
-    env.init(argc, argv);   // so execvp/getenv see the real environment
+    env.init(argc, argv);
+    let is [4096]u8 as cc;
+    if (which("caustic", cast(*u8, &cc)) == 0) { io.write_str(1, "caustic not found in PATH\n"); return 2; }
+    let is *u8 as ccp = cast(*u8, &cc);
+    silence_stderr();
 
     let is i64 as fail with mut = 0;
-    fail = fail + cast(i64, run_case("test_facade",    "tests/test_facade.cst"));
-    fail = fail + cast(i64, run_case("test_buf",       "tests/test_buf.cst"));
-    fail = fail + cast(i64, run_case("test_ucd",       "tests/test_ucd.cst"));
-    fail = fail + cast(i64, run_case("test_utf",       "tests/test_utf.cst"));
-    fail = fail + cast(i64, run_case("test_width",     "tests/test_width.cst"));
-    fail = fail + cast(i64, run_case("test_normalize", "tests/test_normalize.cst"));
-    fail = fail + cast(i64, run_case("conf_normalize", "tests/conformance/conf_normalize.cst"));
-    fail = fail + cast(i64, run_case("test_case",      "tests/test_case.cst"));
-    fail = fail + cast(i64, run_case("conf_grapheme",  "tests/conformance/conf_grapheme.cst"));
-    fail = fail + cast(i64, run_case("conf_word",      "tests/conformance/conf_word.cst"));
-    fail = fail + cast(i64, run_case("conf_sentence",  "tests/conformance/conf_sentence.cst"));
-    fail = fail + cast(i64, run_case("conf_linebreak", "tests/conformance/conf_linebreak.cst"));
-    fail = fail + cast(i64, run_case("conf_bidi",      "tests/conformance/conf_bidi.cst"));
-    fail = fail + cast(i64, run_case("test_idna",      "tests/test_idna.cst"));
-    fail = fail + cast(i64, run_case("conf_idna",      "tests/conformance/conf_idna.cst"));
-    fail = fail + cast(i64, run_case("conf_collate",   "tests/conformance/conf_collate.cst"));
-    fail = fail + cast(i64, run_case("test_encodings", "tests/test_encodings.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_facade",    "tests/test_facade.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_buf",       "tests/test_buf.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_ucd",       "tests/test_ucd.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_utf",       "tests/test_utf.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_width",     "tests/test_width.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_normalize", "tests/test_normalize.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_normalize", "tests/conformance/conf_normalize.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_case",      "tests/test_case.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_grapheme",  "tests/conformance/conf_grapheme.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_word",      "tests/conformance/conf_word.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_sentence",  "tests/conformance/conf_sentence.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_linebreak", "tests/conformance/conf_linebreak.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_bidi",      "tests/conformance/conf_bidi.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_idna",      "tests/test_idna.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_idna",      "tests/conformance/conf_idna.cst"));
+    fail = fail + cast(i64, run_case(ccp, "conf_collate",   "tests/conformance/conf_collate.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_encodings", "tests/test_encodings.cst"));
 
     if (fail == 0) { io.write_str(1, "all green\n"); return 0; }
     io.write_str(1, "FAILURES: "); io.write_int(1, fail); io.write_str(1, "\n");
