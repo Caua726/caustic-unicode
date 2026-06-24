@@ -3,9 +3,9 @@
 // round-trips). Exit 0 = pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../encodings/encodings.cst" as enc;
-use "../ucd/tables/sbcs.cst"      as sb;
-use "../core/buf.cst"            as buf;
+use "../src/encodings/encodings.cst" as enc;
+use "../src/ucd/tables/sbcs.cst"      as sb;
+use "../src/core/buf.cst"            as buf;
 
 fn main() as i32 {
     let is buf.CpBuf as o = buf.cpbuf_new(16);

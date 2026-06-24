@@ -1,0 +1,40 @@
+// A tour of caustic-unicode. Build: caustic examples/demo.cst -o build/demo && ./build/demo
+use "../src/width/width.cst"     as width;
+use "../src/idna/uts46.cst"      as idna;
+use "../src/ucd/props.cst"       as props;
+use "../src/normalize/normalize.cst" as nz;
+use "../src/utf/utf8.cst"        as utf8;
+use "../src/core/buf.cst"        as buf;
+use "std/io.cst"                 as io;
+
+fn main() as i32 {
+    // Display width: terminal columns, not bytes (CJK counts as 2).
+    io.write_str(1, "width('hello 世界')   = ");
+    io.write_int(1, width.string_width("hello 世界", 12));
+    io.write_str(1, "\n");
+
+    // IDNA: a Unicode domain to its ASCII (Punycode) form.
+    let is buf.ByteBuf as ascii = buf.bytebuf_new(64);
+    let is i64 as err with mut = 0;
+    idna.to_ascii("münchen.de", 11, 0, &ascii, &err);
+    io.write_str(1, "to_ascii('münchen.de') = '");
+    io.write_bytes(1, ascii.ptr, ascii.len);
+    io.write_str(1, "'\n");
+
+    // A character property.
+    io.write_str(1, "general_category('A') = ");
+    io.write_int(1, props.general_category(65));
+    io.write_str(1, "\n");
+
+    // Normalize NFC: 'e' + combining acute  ->  é (single code point).
+    let is [2]i32 as decomposed; decomposed[0] = 101; decomposed[1] = 769;
+    let is buf.CpBuf as nfc = buf.cpbuf_new(8);
+    nz.nfc(cast(*i32, &decomposed), 2, &nfc);
+    io.write_str(1, "nfc(e + U+0301) length = ");
+    io.write_int(1, nfc.len);
+    io.write_str(1, " (cp ");
+    io.write_int(1, cast(i64, nfc.ptr[0]));
+    io.write_str(1, ")\n");
+
+    return 0;
+}

@@ -4,11 +4,11 @@
 // Exit 0 = pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../utf/utf8.cst"  as utf8;
-use "../utf/utf16.cst" as utf16;
-use "../utf/utf32.cst" as utf32;
-use "../core/buf.cst"  as buf;
-use "../core/errno.cst" as errno;
+use "../src/utf/utf8.cst"  as utf8;
+use "../src/utf/utf16.cst" as utf16;
+use "../src/utf/utf32.cst" as utf32;
+use "../src/core/buf.cst"  as buf;
+use "../src/core/errno.cst" as errno;
 
 fn main() as i32 {
     let is [4]u8 as tmp;

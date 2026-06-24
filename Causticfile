@@ -1,43 +1,46 @@
 name "caustic-unicode"
-version "0.0.1"
+version "0.1.0"
 author "Caua"
 
-target "test_buf" {
-    src "tests/test_buf.cst"
-    out "build/test_buf"
-}
+# --- unit tests (curated vectors) ---
+target "test_buf"       { src "tests/test_buf.cst"        out "build/test_buf" }
+target "test_ucd"       { src "tests/test_ucd.cst"        out "build/test_ucd" }
+target "test_utf"       { src "tests/test_utf.cst"        out "build/test_utf" }
+target "test_width"     { src "tests/test_width.cst"      out "build/test_width" }
+target "test_normalize" { src "tests/test_normalize.cst"  out "build/test_normalize" }
+target "test_case"      { src "tests/test_case.cst"       out "build/test_case" }
+target "test_idna"      { src "tests/test_idna.cst"       out "build/test_idna" }
+target "test_encodings" { src "tests/test_encodings.cst"  out "build/test_encodings" }
 
-target "test_ucd" {
-    src "tests/test_ucd.cst"
-    out "build/test_ucd"
-}
+# --- conformance against the official Unicode test files ---
+target "conf_normalize" { src "tests/conformance/conf_normalize.cst" out "build/conf_normalize" }
+target "conf_grapheme"  { src "tests/conformance/conf_grapheme.cst"  out "build/conf_grapheme" }
+target "conf_word"      { src "tests/conformance/conf_word.cst"      out "build/conf_word" }
+target "conf_sentence"  { src "tests/conformance/conf_sentence.cst"  out "build/conf_sentence" }
+target "conf_linebreak" { src "tests/conformance/conf_linebreak.cst" out "build/conf_linebreak" }
+target "conf_bidi"      { src "tests/conformance/conf_bidi.cst"      out "build/conf_bidi" }
+target "conf_idna"      { src "tests/conformance/conf_idna.cst"      out "build/conf_idna" }
+target "conf_collate"   { src "tests/conformance/conf_collate.cst"   out "build/conf_collate" }
 
-target "test_utf" {
-    src "tests/test_utf.cst"
-    out "build/test_utf"
-}
+# --- example ---
+target "demo" { src "examples/demo.cst" out "build/demo" }
 
-target "test_width" {
-    src "tests/test_width.cst"
-    out "build/test_width"
-}
+# --- table generator (offline) ---
+target "gen" { src "tools/gen.cst" out "build/gen" }
 
-target "test_normalize" {
-    src "tests/test_normalize.cst"
-    out "build/test_normalize"
-}
-
-target "conf_normalize" {
-    src "tests/conformance/conf_normalize.cst"
-    out "build/conf_normalize"
-}
-
+# compile the whole library, then run every test + conformance suite
 script "test" {
     "bash tests/run.sh"
 }
 
+# regenerate src/ucd/tables/*.cst from the UCD already in tools/ucd/
 script "gen" {
     "caustic tools/gen.cst -o build/gen && ./build/gen"
+}
+
+# download the UCD/UCA/IDNA/WHATWG data, then regenerate the tables
+script "regen" {
+    "bash tools/fetch.sh && caustic tools/gen.cst -o build/gen && ./build/gen"
 }
 
 script "clean" {

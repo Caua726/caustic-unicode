@@ -3,7 +3,7 @@
 // Exit 0 = pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../width/width.cst" as width;
+use "../src/width/width.cst" as width;
 
 fn main() as i32 {
     if (width.cp_width(65)      != 1) { return 1; }   // 'A' narrow

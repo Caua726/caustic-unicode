@@ -6,11 +6,11 @@
 // Exit 0 = all pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../ucd/props.cst"        as props;
-use "../ucd/tables/script.cst" as scr;
-use "../ucd/tables/eaw.cst"    as eaw;
-use "../ucd/tables/bidi.cst"   as bidi;
-use "../ucd/tables/gcb.cst"    as gcb;
+use "../src/ucd/props.cst"        as props;
+use "../src/ucd/tables/script.cst" as scr;
+use "../src/ucd/tables/eaw.cst"    as eaw;
+use "../src/ucd/tables/bidi.cst"   as bidi;
+use "../src/ucd/tables/gcb.cst"    as gcb;
 
 fn main() as i32 {
     if (props.general_category(65)       != props.GC_LU) { return 1; }   // 'A' U+0041

@@ -1,42 +1,108 @@
 # caustic-unicode
 
-Biblioteca Unicode nível ICU, escrita em **Caustic puro**, zero-dependência.
-Implementa **Unicode 16.0**.
+**A Unicode and internationalization library for [Caustic](https://github.com/Caua726/Caustic).**
 
-Cobre: propriedades de caractere (UCD), UTF-8/16/32, normalização (NFC/NFD/NFKC/NFKD),
-case (lower/upper/title/fold + tailoring), segmentação (grafema/palavra/sentença — UAX #29),
-quebra de linha (UAX #14), bidi (UAX #9), collation (UCA), IDNA2008 + Punycode + UTS #46,
-East Asian Width e os encodings legados do WHATWG Encoding Standard.
+Pure Caustic, no dependencies, Unicode **16.0**. It covers the parts of text
+handling that are easy to get wrong: normalization, case, segmentation, line
+breaking, bidirectional reordering, collation, IDNA, and the legacy character
+encodings you still meet on the web. Every algorithm is checked against
+Unicode's own conformance test files — about **580,000 lines** of them.
 
-## Arquitetura
+```caustic
+use "caustic-unicode/src/width/width.cst" as width;
+use "caustic-unicode/src/idna/uts46.cst"  as idna;
+use "caustic-unicode/src/core/buf.cst"    as buf;
 
-O coração é **dados, não algoritmos**. Um gerador offline (`tools/`, em Caustic) parseia o
-Unicode Character Database e cospe tabelas `.cst`; um **trie de code point de 2 níveis** mapeia
-`cp → propriedade` em O(1). As tabelas viram globais `*u8 with imut` (bytes em `\xNN`)
-reinterpretados como `u16`/`u32` little-endian — a linguagem não tem array-literal.
+fn main() as i32 {
+    // Terminal columns, not bytes or code points (CJK and wide emoji count as 2):
+    let is i64 as cols = width.string_width("hello 世界", 12);     // -> 10
 
+    // A Unicode domain in its on-the-wire ASCII (Punycode) form:
+    let is buf.ByteBuf as ascii = buf.bytebuf_new(64);
+    let is i64 as err with mut = 0;
+    idna.to_ascii("münchen.de", 11, 0, &ascii, &err);            // -> "xn--mnchen-3ya.de"
+    return 0;
+}
 ```
-core/   primitivos (errno, types, buf)
-ucd/    trie + lookups de propriedade (tables/ é gerado)
-utf/    utf8/16/32   width/  normalize/  case/  segment/
-linebreak/  bidi/  collate/  idna/  encodings/
-tools/  gerador de tabelas + fetch.sh
-tests/  test_*.cst + conformance/ (vetores oficiais do Unicode)
-```
 
-## Build & teste
+## What's in it
+
+| Module | What it does | Conformance |
+| --- | --- | --- |
+| `ucd` | Character properties (category, script, combining class, bidi class, East Asian width, break properties, …) | curated |
+| `utf` | UTF-8 / UTF-16 / UTF-32 encode, decode, validate, convert | curated |
+| `normalize` | NFC, NFD, NFKC, NFKD (+ quick-check) | `NormalizationTest` — all 20,026 lines |
+| `case` | lower / upper / title / case-fold, with Turkish/Azeri/Lithuanian tailoring | curated |
+| `segment` | grapheme cluster, word, and sentence boundaries (UAX #29) | `Grapheme`/`Word`/`Sentence` `BreakTest` — all lines |
+| `linebreak` | line break opportunities (UAX #14) | `LineBreakTest` — all 16,700 lines |
+| `bidi` | the bidirectional algorithm — levels, isolates, brackets, reordering (UAX #9) | `BidiCharacterTest` — all 96,464 lines |
+| `collate` | language-neutral sorting via the Unicode Collation Algorithm (DUCET) | `CollationTest` — all 434,165 lines |
+| `idna` | domain names: UTS #46 to-ASCII / to-Unicode and Punycode (RFC 3492) | `IdnaTestV2` — all 6,506 lines |
+| `width` | display width of a string, grapheme-cluster aware | curated |
+| `encodings` | WHATWG legacy codecs — windows-125x, ISO-8859-\*, Shift_JIS, EUC-JP/KR, Big5, GB18030, … | curated + round-trip |
+
+The umbrella module `src/caustic_unicode.cst` re-exports all of these, so you can
+`use` the whole library at once or pull in a single module. A runnable tour is
+in [`examples/demo.cst`](examples/demo.cst).
+
+## How it works, briefly
+
+The hard part of Unicode isn't the algorithms — those are well specified — it's
+the **data**. An offline generator (`tools/gen.cst`, itself written in Caustic)
+parses the Unicode Character Database and emits the lookup tables as `.cst`
+source; a **two-level code-point trie** then resolves `code point → property` in
+constant time at runtime. The generated tables live under `src/ucd/tables/` and
+are committed, so consuming the library needs no network access and no
+generator run. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the details.
+
+## Using it
+
+The internal currency is a **run of code points** (`*i32`); byte-oriented
+wrappers sit at the edges. Functions that produce text take a growable output
+buffer (`*CpBuf` / `*ByteBuf`) and return a count, or `0 - UERR_*` on error —
+there are no generic `Result` types. Full signatures are in
+[docs/API.md](docs/API.md).
+
+## Build & test
 
 ```bash
-bash tools/fetch.sh                 # baixa o UCD 16.0 para tools/ucd/ (uma vez)
-caustic tools/gen.cst -o build/gen && ./build/gen   # gera ucd/tables/*.cst
-caustic -c caustic_unicode.cst      # compile-check da lib inteira
-bash tests/run.sh                   # roda os testes (exit 0 = tudo verde)
+caustic -c src/caustic_unicode.cst   # type-check the whole library
+bash tests/run.sh                    # build & run every test + conformance suite (exit 0 = green)
 ```
 
-## Uso
+The conformance vectors live in `tests/vectors/` and are committed, so the test
+suite runs offline.
 
-```cst
-use "caustic-unicode/caustic_unicode.cst" as u;
-// u.version()  ->  "16.0"
-// u.buf.cpbuf_new(16);  ...
+## Regenerating the tables
+
+You only need this to re-pin to a newer Unicode version; the tables are already
+committed.
+
+```bash
+bash tools/fetch.sh                                  # download UCD/UCA/IDNA/WHATWG data into tools/ucd/ (gitignored)
+caustic tools/gen.cst -o build/gen && ./build/gen    # rewrite src/ucd/tables/*.cst
 ```
+
+## Layout
+
+```
+src/        the library
+  core/       errno, types, growable buffers
+  ucd/        property lookups + the generated tables/
+  utf/  width/  normalize/  case/  segment/
+  linebreak/  bidi/  collate/  idna/  encodings/
+  caustic_unicode.cst   umbrella facade
+tools/      gen.cst (table generator) + fetch.sh
+tests/      test_*.cst, conformance/conf_*.cst, vectors/ (official Unicode test files)
+docs/       ARCHITECTURE.md, API.md
+```
+
+## Status
+
+All twelve modules are complete and the full suite is green. Pinned to Unicode
+16.0. Targets x86-64 (the tables assume little-endian).
+
+## License
+
+Code: MIT. The bundled Unicode data files are under the
+[Unicode License](https://www.unicode.org/license.txt).

@@ -5,9 +5,9 @@
 // Exit 0 = pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../idna/uts46.cst"    as uts46;
-use "../idna/punycode.cst" as puny;
-use "../core/buf.cst"      as buf;
+use "../src/idna/uts46.cst"    as uts46;
+use "../src/idna/punycode.cst" as puny;
+use "../src/core/buf.cst"      as buf;
 
 fn eqs(o as *buf.ByteBuf, s as *u8) as i32 {
     let is i64 as i with mut = 0;

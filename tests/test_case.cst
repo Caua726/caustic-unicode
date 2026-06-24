@@ -6,8 +6,8 @@
 // Exit 0 = pass; non-zero = the numbered check that failed.
 // =======================================================
 
-use "../case/case.cst"  as cs;
-use "../core/buf.cst"   as buf;
+use "../src/case/case.cst"  as cs;
+use "../src/core/buf.cst"   as buf;
 
 fn eq(o as *buf.CpBuf, e as *i32, en as i64) as i32 {
     if (o.len != en) { return 0; }

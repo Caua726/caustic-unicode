@@ -27,7 +27,7 @@ run_case() {
 
 # Also compile-check the whole library facade (no main needed).
 printf '[check] %-16s ' "facade"
-if caustic -c caustic_unicode.cst > build/facade.log 2>&1; then
+if caustic -c src/caustic_unicode.cst > build/facade.log 2>&1; then
     echo "OK"
 else
     echo "COMPILE FAIL"; tail -8 build/facade.log | sed 's/^/    /'; fail=1

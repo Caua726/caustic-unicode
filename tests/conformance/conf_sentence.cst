@@ -7,8 +7,8 @@
 
 use "std/io.cst"  as io;
 use "std/mem.cst" only bins, core as mem;
-use "../../segment/sentence.cst" as se;
-use "../../core/buf.cst"         as buf;
+use "../../src/segment/sentence.cst" as se;
+use "../../src/core/buf.cst"         as buf;
 
 fn slurp(path as *u8, out_len as *i32) as *u8 {
     let is i64 as fd = io._open_read(path);

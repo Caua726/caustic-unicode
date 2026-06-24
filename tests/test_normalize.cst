@@ -5,8 +5,8 @@
 // The exhaustive check is tests/conformance/conf_normalize.cst.
 // =======================================================
 
-use "../normalize/normalize.cst" as nz;
-use "../core/buf.cst"            as buf;
+use "../src/normalize/normalize.cst" as nz;
+use "../src/core/buf.cst"            as buf;
 
 fn check(o as *buf.CpBuf, e as *i32, en as i64) as i32 {
     if (o.len != en) { return 0; }

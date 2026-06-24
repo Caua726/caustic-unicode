@@ -10,9 +10,9 @@
 
 use "std/io.cst"  as io;
 use "std/mem.cst" only bins, core as mem;
-use "../../idna/uts46.cst" as uts46;
-use "../../utf/utf8.cst"   as utf8;
-use "../../core/buf.cst"   as buf;
+use "../../src/idna/uts46.cst" as uts46;
+use "../../src/utf/utf8.cst"   as utf8;
+use "../../src/core/buf.cst"   as buf;
 
 let is i64 as FLAGS_N with imut = 30;   // STD3 | CHECK_HYPHENS | CHECK_BIDI | CHECK_JOINERS
 let is i64 as FLAGS_T with imut = 31;   // + TRANSITIONAL

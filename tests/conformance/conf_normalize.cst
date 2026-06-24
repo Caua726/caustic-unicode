@@ -12,8 +12,8 @@
 
 use "std/io.cst"  as io;
 use "std/mem.cst" only bins, core as mem;
-use "../../normalize/normalize.cst" as nz;
-use "../../core/buf.cst"            as buf;
+use "../../src/normalize/normalize.cst" as nz;
+use "../../src/core/buf.cst"            as buf;
 
 fn slurp(path as *u8, out_len as *i32) as *u8 {
     let is i64 as fd = io._open_read(path);

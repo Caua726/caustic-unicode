@@ -4,7 +4,7 @@
 // Exit 0 = all pass. Non-zero = the numbered check that failed.
 // =======================================================
 
-use "../core/buf.cst" as buf;
+use "../src/core/buf.cst" as buf;
 
 fn main() as i32 {
     // ---- CpBuf: push beyond initial cap forces a grow ----

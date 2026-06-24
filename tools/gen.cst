@@ -413,7 +413,7 @@ fn gen_gc() as i32 {
     }
 
     io.write_str(1, "gc:");
-    return build_and_emit("ucd/tables/gc.cst", "gc", "GC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/gc.cst", "gc", "GC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // ---- generic enum-property files ("RANGE ; Value # comment") ----
@@ -614,7 +614,7 @@ fn gen_ccc() as i32 {
         pos = le + 1;
     }
     io.write_str(1, "ccc:");
-    return build_and_emit("ucd/tables/ccc.cst", "ccc", "CCC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/ccc.cst", "ccc", "CCC", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // ---- Bidi_Class (DerivedBidiClass.txt) ----
@@ -699,7 +699,7 @@ fn gen_bidi() as i32 {
         pos = le + 1;
     }
     io.write_str(1, "bidi:");
-    return build_and_emit("ucd/tables/bidi.cst", "bidi", "BIDI", flat, 0, U_MAXCP, it.names, it.count);
+    return build_and_emit("src/ucd/tables/bidi.cst", "bidi", "BIDI", flat, 0, U_MAXCP, it.names, it.count);
 }
 
 // ---- Decomposition (UnicodeData.txt field 5) ----
@@ -765,7 +765,7 @@ fn gen_decomp() as i32 {
     let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
     let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
     let is i32 as data_count = build_trie(flat, 0, index, data);
-    let is i64 as fd = io._open_write("ucd/tables/decomp.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/decomp.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -904,7 +904,7 @@ fn gen_compose() as i32 {
     }
 
     // 4. emit.
-    let is i64 as fd = io._open_write("ucd/tables/compose.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/compose.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -981,7 +981,7 @@ fn gen_caseprops() as i32 {
     if (cast(i64, p2) == 0) { return cast(i32, 0 - 1); }
     mark_prop(p2, l2, "Soft_Dotted", 4, flat);
     io.write_str(1, "caseprops:");
-    return build_and_emit("ucd/tables/caseprops.cst", "caseprops", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/caseprops.cst", "caseprops", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // ---- simple case mapping (UnicodeData fields 12/13/14) ----
@@ -1030,7 +1030,7 @@ fn gen_case_simple() as i32 {
         }
         pos = le + 1;
     }
-    let is i64 as fd = io._open_write("ucd/tables/simplecase.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/simplecase.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1110,7 +1110,7 @@ fn gen_fold() as i32 {
         }
         pos = le + 1;
     }
-    let is i64 as fd = io._open_write("ucd/tables/fold.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/fold.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1226,7 +1226,7 @@ fn gen_special() as i32 {
         scp[i] = ecp[src]; shdr[i] = ehdr[src]; soff[i] = eoff[src];
         i = i + 1;
     }
-    let is i64 as fd = io._open_write("ucd/tables/special.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/special.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1296,7 +1296,7 @@ fn gen_incb() as i32 {
         pos = le + 1;
     }
     io.write_str(1, "incb:");
-    return build_and_emit("ucd/tables/incb.cst", "incb", "INCB", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/incb.cst", "incb", "INCB", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // ---- Extended_Pictographic (emoji-data.txt) for grapheme/word breaking ----
@@ -1308,7 +1308,7 @@ fn gen_extpict() as i32 {
     if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
     mark_prop(p, l, "Extended_Pictographic", 1, flat);
     io.write_str(1, "extpict:");
-    return build_and_emit("ucd/tables/extpict.cst", "extpict", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/extpict.cst", "extpict", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // ---- Bidi paired brackets (BidiBrackets.txt) ----
@@ -1359,7 +1359,7 @@ fn gen_brackets() as i32 {
         scp[i] = bcp[s]; spair[i] = bpair[s]; stype[i] = btype[s];
         i = i + 1;
     }
-    let is i64 as fd = io._open_write("ucd/tables/brackets.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/brackets.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1418,7 +1418,7 @@ fn gen_mirror() as i32 {
         scp[i] = mcp[s]; sto[i] = mto[s];
         i = i + 1;
     }
-    let is i64 as fd = io._open_write("ucd/tables/mirror.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/mirror.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1510,7 +1510,7 @@ fn gen_idna() as i32 {
     let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
     let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
     let is i32 as dc = build_trie(flat, 0, index, data);
-    let is i64 as fd = io._open_write("ucd/tables/idna.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/idna.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1539,7 +1539,7 @@ fn gen_uideo() as i32 {
     if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
     mark_prop(p, l, "Unified_Ideograph", 1, flat);
     io.write_str(1, "uideo:");
-    return build_and_emit("ucd/tables/uideo.cst", "uideo", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/uideo.cst", "uideo", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // Read a hex field; advance *q to the terminator.
@@ -1671,7 +1671,7 @@ fn gen_collate() as i32 {
     let is *u16 as index = cast(*u16, mem.core.mmap_anon(cast(i64, NBLOCKS) * 2));
     let is *u16 as data  = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
     let is i32 as dc = build_trie(flat, 0, index, data);
-    let is i64 as fd = io._open_write("ucd/tables/collate.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/collate.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1736,7 +1736,7 @@ fn gen_joining() as i32 {
         pos = le + 1;
     }
     io.write_str(1, "joining:");
-    return build_and_emit("ucd/tables/joining.cst", "joining", "JT", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+    return build_and_emit("src/ucd/tables/joining.cst", "joining", "JT", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
 // ---- WHATWG single-byte encodings ----
@@ -1803,7 +1803,7 @@ fn gen_sbcs() as i32 {
     _sb_fill("tools/ucd/whatwg/index-windows-1258.txt", 25, t);
     _sb_fill("tools/ucd/whatwg/index-x-mac-cyrillic.txt", 26, t);
 
-    let is i64 as fd = io._open_write("ucd/tables/sbcs.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/sbcs.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1954,7 +1954,7 @@ fn gen_mbcs() as i32 {
     let is *u32 as rgp = cast(*u32, mem.core.mmap_anon(cast(i64, 24000) * 4));
     let is i32 as nrg = _mb_reverse(gbk, ng, 0, rgc, rgp, 24000);
 
-    let is i64 as fd = io._open_write("ucd/tables/mbcs.cst");
+    let is i64 as fd = io._open_write("src/ucd/tables/mbcs.cst");
     if (fd < 0) { return cast(i32, 0 - 1); }
     let is [16384]u8 as wbuf;
     let is io.Writer as w = io.Writer(fd, cast(*u8, &wbuf), 16384);
@@ -1999,12 +1999,12 @@ fn gen_mbcs() as i32 {
 fn main() as i32 {
     if (gen_gc() < 0)  { return 1; }
     if (gen_ccc() < 0) { return 2; }
-    if (gen_enum_file("tools/ucd/Scripts.txt", "ucd/tables/script.cst", "script", "SC", "Unknown", U_MAXCP) < 0) { return 3; }
-    if (gen_enum_file("tools/ucd/EastAsianWidth.txt", "ucd/tables/eaw.cst", "eaw", "EAW", "N", U_MAXCP) < 0) { return 4; }
-    if (gen_enum_file("tools/ucd/LineBreak.txt", "ucd/tables/lb.cst", "lb", "LB", "XX", U_MAXCP) < 0) { return 5; }
-    if (gen_enum_file("tools/ucd/GraphemeBreakProperty.txt", "ucd/tables/gcb.cst", "gcb", "GCB", "Other", U_MAXCP) < 0) { return 6; }
-    if (gen_enum_file("tools/ucd/WordBreakProperty.txt", "ucd/tables/wb.cst", "wb", "WB", "Other", U_MAXCP) < 0) { return 7; }
-    if (gen_enum_file("tools/ucd/SentenceBreakProperty.txt", "ucd/tables/sb.cst", "sb", "SB", "Other", U_MAXCP) < 0) { return 8; }
+    if (gen_enum_file("tools/ucd/Scripts.txt", "src/ucd/tables/script.cst", "script", "SC", "Unknown", U_MAXCP) < 0) { return 3; }
+    if (gen_enum_file("tools/ucd/EastAsianWidth.txt", "src/ucd/tables/eaw.cst", "eaw", "EAW", "N", U_MAXCP) < 0) { return 4; }
+    if (gen_enum_file("tools/ucd/LineBreak.txt", "src/ucd/tables/lb.cst", "lb", "LB", "XX", U_MAXCP) < 0) { return 5; }
+    if (gen_enum_file("tools/ucd/GraphemeBreakProperty.txt", "src/ucd/tables/gcb.cst", "gcb", "GCB", "Other", U_MAXCP) < 0) { return 6; }
+    if (gen_enum_file("tools/ucd/WordBreakProperty.txt", "src/ucd/tables/wb.cst", "wb", "WB", "Other", U_MAXCP) < 0) { return 7; }
+    if (gen_enum_file("tools/ucd/SentenceBreakProperty.txt", "src/ucd/tables/sb.cst", "sb", "SB", "Other", U_MAXCP) < 0) { return 8; }
     if (gen_bidi() < 0) { return 9; }
     if (gen_decomp() < 0) { return 10; }
     if (gen_compose() < 0) { return 11; }
