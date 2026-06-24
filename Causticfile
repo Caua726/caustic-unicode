@@ -25,13 +25,14 @@ target "conf_collate"   { src "tests/conformance/conf_collate.cst"   out "build/
 # --- example ---
 target "demo" { src "examples/demo.cst" out "build/demo" }
 
-# --- offline tooling ---
-target "fetch" { src "tools/fetch.cst" out "build/fetch" }
-target "gen"   { src "tools/gen.cst"   out "build/gen" }
+# --- tooling (all Caustic) ---
+target "run"   { src "tests/run.cst"   out "build/run" }     # the test runner
+target "fetch" { src "tools/fetch.cst" out "build/fetch" }   # data downloader
+target "gen"   { src "tools/gen.cst"   out "build/gen" }     # table generator
 
 # compile the whole library, then run every test + conformance suite
 script "test" {
-    "bash tests/run.sh"
+    "caustic tests/run.cst -o build/run && ./build/run"
 }
 
 # regenerate src/ucd/tables/*.cst from the UCD already in tools/ucd/

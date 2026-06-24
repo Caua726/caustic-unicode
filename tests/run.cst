@@ -1,0 +1,100 @@
+// =======================================================
+// tests/run.cst — the test runner, in Caustic.
+// Compiles and runs every unit test and conformance suite, checks exit codes,
+// and prints a PASS/FAIL line for each. Exits 0 iff everything is green.
+// Run from the repo root:  caustic tests/run.cst -o build/run && ./build/run
+// =======================================================
+
+use "std/process.cst"  as proc;
+use "std/os/linux.cst" as linux;
+use "std/env.cst"      as env;
+use "std/io.cst"       as io;
+
+fn app(buf as *u8, pos as i64, s as *u8) as i64 {
+    let is i64 as p with mut = pos;
+    let is i64 as i with mut = 0;
+    while (s[i] != 0) { buf[p] = s[i]; p = p + 1; i = i + 1; }
+    return p;
+}
+fn slen(s as *u8) as i64 {
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+fn label(name as *u8) as void {
+    io.write_str(1, "[build] ");
+    io.write_str(1, name);
+    let is i64 as pad with mut = 16 - slen(name);
+    while (pad > 0) { io.write_str(1, " "); pad = pad - 1; }
+}
+
+// Run `caustic` with its stdout/stderr sent to /dev/null (the compiler is
+// chatty); return its exit code. argv[0] must be "caustic".
+fn caustic_quiet(argv as *u8) as i32 {
+    let is i64 as devnull = linux.open("/dev/null", linux.O_WRONLY, 0);
+    let is i64 as pid = linux.fork();
+    if (pid == 0) {
+        if (devnull >= 0) { linux.dup2(devnull, 1); linux.dup2(devnull, 2); }
+        env.execvp("caustic", argv);
+        linux.exit(127);
+    }
+    if (devnull >= 0) { linux.close(devnull); }
+    return proc.wait_pid(pid);
+}
+
+// Compile src to build/<name> (quietly), then run it (output visible).
+// Returns 0 on pass, 1 on failure.
+fn run_case(name as *u8, src as *u8) as i32 {
+    let is [256]u8 as out;
+    let is i64 as p with mut = app(cast(*u8, &out), 0, "build/");
+    p = app(cast(*u8, &out), p, name);
+    out[p] = cast(u8, 0);
+
+    label(name);
+
+    let is [5]i64 as cav;
+    cav[0] = cast(i64, "caustic"); cav[1] = cast(i64, src);
+    cav[2] = cast(i64, "-o"); cav[3] = cast(i64, cast(*u8, &out)); cav[4] = 0;
+    if (caustic_quiet(cast(*u8, &cav)) != 0) { io.write_str(1, "COMPILE FAIL\n"); return 1; }
+
+    let is [2]i64 as rav;
+    rav[0] = cast(i64, cast(*u8, &out)); rav[1] = 0;
+    let is i64 as rpid = proc.spawnp(cast(*u8, &out), cast(*u8, &rav));
+    let is i32 as rc = proc.wait_pid(rpid);
+    if (rc == 0) { io.write_str(1, "PASS\n"); return 0; }
+    io.write_str(1, "FAIL (exit "); io.write_int(1, cast(i64, rc)); io.write_str(1, ")\n");
+    return 1;
+}
+
+fn main() as i32 {
+    let is i64 as fail with mut = 0;
+
+    // compile-check the whole library facade
+    io.write_str(1, "[check] facade           ");
+    let is [4]i64 as fav;
+    fav[0] = cast(i64, "caustic"); fav[1] = cast(i64, "-c");
+    fav[2] = cast(i64, "src/caustic_unicode.cst"); fav[3] = 0;
+    if (caustic_quiet(cast(*u8, &fav)) == 0) { io.write_str(1, "OK\n"); }
+    else { io.write_str(1, "COMPILE FAIL\n"); fail = fail + 1; }
+
+    fail = fail + cast(i64, run_case("test_buf",       "tests/test_buf.cst"));
+    fail = fail + cast(i64, run_case("test_ucd",       "tests/test_ucd.cst"));
+    fail = fail + cast(i64, run_case("test_utf",       "tests/test_utf.cst"));
+    fail = fail + cast(i64, run_case("test_width",     "tests/test_width.cst"));
+    fail = fail + cast(i64, run_case("test_normalize", "tests/test_normalize.cst"));
+    fail = fail + cast(i64, run_case("conf_normalize", "tests/conformance/conf_normalize.cst"));
+    fail = fail + cast(i64, run_case("test_case",      "tests/test_case.cst"));
+    fail = fail + cast(i64, run_case("conf_grapheme",  "tests/conformance/conf_grapheme.cst"));
+    fail = fail + cast(i64, run_case("conf_word",      "tests/conformance/conf_word.cst"));
+    fail = fail + cast(i64, run_case("conf_sentence",  "tests/conformance/conf_sentence.cst"));
+    fail = fail + cast(i64, run_case("conf_linebreak", "tests/conformance/conf_linebreak.cst"));
+    fail = fail + cast(i64, run_case("conf_bidi",      "tests/conformance/conf_bidi.cst"));
+    fail = fail + cast(i64, run_case("test_idna",      "tests/test_idna.cst"));
+    fail = fail + cast(i64, run_case("conf_idna",      "tests/conformance/conf_idna.cst"));
+    fail = fail + cast(i64, run_case("conf_collate",   "tests/conformance/conf_collate.cst"));
+    fail = fail + cast(i64, run_case("test_encodings", "tests/test_encodings.cst"));
+
+    if (fail == 0) { io.write_str(1, "all green\n"); return 0; }
+    io.write_str(1, "FAILURES: "); io.write_int(1, fail); io.write_str(1, "\n");
+    return 1;
+}

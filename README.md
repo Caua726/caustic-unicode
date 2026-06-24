@@ -60,18 +60,22 @@ generator run. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the details.
 The internal currency is a **run of code points** (`*i32`); byte-oriented
 wrappers sit at the edges. Functions that produce text take a growable output
 buffer (`*CpBuf` / `*ByteBuf`) and return a count, or `0 - UERR_*` on error —
-there are no generic `Result` types. Full signatures are in
-[docs/API.md](docs/API.md).
+there are no generic `Result` types.
+
+- **[docs/GUIDE.md](docs/GUIDE.md)** — task-oriented recipes ("how do I normalize / sort / wrap / transcode?").
+- **[docs/API.md](docs/API.md)** — every public function, by module.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how the tables and generator work inside.
 
 ## Build & test
 
 ```bash
-caustic -c src/caustic_unicode.cst   # type-check the whole library
-bash tests/run.sh                    # build & run every test + conformance suite (exit 0 = green)
+caustic -c src/caustic_unicode.cst                  # type-check the whole library
+caustic tests/run.cst -o build/run && ./build/run   # build & run every test + conformance suite
 ```
 
-The conformance vectors live in `tests/vectors/` and are committed, so the test
-suite runs offline.
+`tests/run.cst` is the test runner — also written in Caustic. It compiles and
+runs every unit test and conformance suite and exits non-zero if any fail. The
+vectors in `tests/vectors/` are committed, so the suite runs offline.
 
 ## Regenerating the tables
 
@@ -96,9 +100,15 @@ src/        the library
   linebreak/  bidi/  collate/  idna/  encodings/
   caustic_unicode.cst   umbrella facade
 tools/      gen.cst (table generator) + fetch.cst (data downloader)
-tests/      test_*.cst, conformance/conf_*.cst, vectors/ (official Unicode test files)
-docs/       ARCHITECTURE.md, API.md
+tests/      run.cst (test runner), test_*.cst, conformance/conf_*.cst, vectors/
+docs/       ARCHITECTURE.md, API.md, GUIDE.md
+examples/   demo.cst
 ```
+
+Everything here is Caustic — the library, the table generator, the data
+downloader, and the test runner. There are no shell scripts and no build steps
+in another language; the only external tool is `curl`, which `fetch.cst` shells
+out to because the data servers are HTTPS-only.
 
 ## Status
 

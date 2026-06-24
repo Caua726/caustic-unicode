@@ -1,0 +1,44 @@
+// Verifies the snippets used in docs/GUIDE.md actually compile and run.
+// caustic examples/guide.cst -o build/guide && ./build/guide
+use "../src/utf/utf8.cst"        as utf8;
+use "../src/segment/grapheme.cst" as seg;
+use "../src/case/case.cst"       as cs;
+use "../src/collate/collate.cst" as collate;
+use "../src/bidi/bidi.cst"       as bidi;
+use "../src/encodings/encodings.cst" as enc;
+use "../src/ucd/tables/sbcs.cst" as sb;
+use "../src/core/buf.cst"        as buf;
+use "std/io.cst"                 as io;
+
+fn line(name as *u8, v as i64) as void {
+    io.write_str(1, name); io.write_str(1, " = "); io.write_int(1, v); io.write_str(1, "\n");
+}
+
+fn main() as i32 {
+    // grapheme clusters: "e" + combining acute is ONE user-perceived character.
+    let is buf.CpBuf as g = buf.cpbuf_new(8);
+    utf8.to_cps("e\xCC\x81", 3, &g);
+    line("graphemes", seg.grapheme_count(g.ptr, g.len));               // 1
+
+    // case-insensitive equality.
+    let is [5]i32 as up; up[0]=72; up[1]=69; up[2]=76; up[3]=76; up[4]=79;   // HELLO
+    let is [5]i32 as lo; lo[0]=104; lo[1]=101; lo[2]=108; lo[3]=108; lo[4]=111; // hello
+    line("eq_fold", cs.eq_fold(cast(*i32, &up), 5, cast(*i32, &lo), 5));   // 1
+
+    // collation: "apple" sorts before "banana".
+    let is [5]i32 as ap; ap[0]=97; ap[1]=112; ap[2]=112; ap[3]=108; ap[4]=101;
+    let is [6]i32 as ba; ba[0]=98; ba[1]=97; ba[2]=110; ba[3]=97; ba[4]=110; ba[5]=97;
+    line("compare(apple,banana)", collate.compare(cast(*i32, &ap), 5, cast(*i32, &ba), 6, collate.VAR_NON_IGNORABLE)); // -1
+
+    // bidi: an Arabic letter forms a right-to-left paragraph (level 1).
+    let is [1]i32 as ar; ar[0] = 1576;                                 // U+0628 ARABIC LETTER BEH
+    let is [1]u8 as lev;
+    line("paragraph_level", bidi.resolve_levels(cast(*i32, &ar), 1, 2, cast(*u8, &lev)));  // 1
+
+    // legacy decode: Shift_JIS 0x82 0xA0 is あ (U+3042).
+    let is [2]u8 as sj; sj[0] = 130; sj[1] = 160;
+    let is buf.CpBuf as out = buf.cpbuf_new(4);
+    enc.sjis_decode(cast(*u8, &sj), 2, &out);
+    line("sjis(0x82A0)", cast(i64, out.ptr[0]));                       // 12354
+    return 0;
+}
