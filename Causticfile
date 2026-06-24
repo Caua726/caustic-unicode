@@ -3,6 +3,7 @@ version "0.1.0"
 author "Caua"
 
 # --- unit tests (curated vectors) ---
+target "test_facade"    { src "tests/test_facade.cst"     out "build/test_facade" }
 target "test_buf"       { src "tests/test_buf.cst"        out "build/test_buf" }
 target "test_ucd"       { src "tests/test_ucd.cst"        out "build/test_ucd" }
 target "test_utf"       { src "tests/test_utf.cst"        out "build/test_utf" }

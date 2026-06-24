@@ -110,10 +110,21 @@ downloader, and the test runner. There are no shell scripts and no build steps
 in another language; the only external tool is `curl`, which `fetch.cst` shells
 out to because the data servers are HTTPS-only.
 
+## Portability
+
+The library is OS-agnostic: it's pure computation over `std/mem`, with no
+syscalls and no platform `#if`s, so it runs anywhere Caustic targets — Linux,
+macOS, Windows. The only hardware assumption is **little-endian** (x86-64,
+ARM64, …), because the generated tables are stored as little-endian blobs.
+
+The tooling is portable too: the test runner, downloader, and generator use the
+cross-platform `std/process` and `std/io` abstractions (the runner dispatches
+per OS exactly as `std/process` does internally). `fetch.cst` shells out to
+`curl`, the one external program it needs.
+
 ## Status
 
-All twelve modules are complete and the full suite is green. Pinned to Unicode
-16.0. Targets x86-64 (the tables assume little-endian).
+All twelve modules are complete and the full suite is green. Pinned to Unicode 16.0.
 
 ## License
 

@@ -1,14 +1,17 @@
 // =======================================================
-// tests/run.cst — the test runner, in Caustic.
-// Compiles and runs every unit test and conformance suite, checks exit codes,
-// and prints a PASS/FAIL line for each. Exits 0 iff everything is green.
+// tests/run.cst — the test runner, in Caustic. Portable across targets via
+// the std abstractions (mirrors how std/process itself dispatches per OS).
+// Compiles and runs every test + conformance suite, checks exit codes, and
+// prints a PASS/FAIL line for each. Exits 0 iff everything is green.
 // Run from the repo root:  caustic tests/run.cst -o build/run && ./build/run
 // =======================================================
 
-use "std/process.cst"  as proc;
-use "std/os/linux.cst" as linux;
+use "std/process.cst" as proc;
+use "std/os.cst"       as os;
 use "std/env.cst"      as env;
 use "std/io.cst"       as io;
+use "std/string.cst"   as str;
+if (__target_is_linux + __compat_mode) use "std/os/linux.cst" as linux;
 
 fn app(buf as *u8, pos as i64, s as *u8) as i64 {
     let is i64 as p with mut = pos;
@@ -22,28 +25,33 @@ fn slen(s as *u8) as i64 {
     return n;
 }
 fn label(name as *u8) as void {
-    io.write_str(1, "[build] ");
+    io.write_str(1, "[test] ");
     io.write_str(1, name);
     let is i64 as pad with mut = 16 - slen(name);
     while (pad > 0) { io.write_str(1, " "); pad = pad - 1; }
 }
 
-// Run `caustic` with its stdout/stderr sent to /dev/null (the compiler is
-// chatty); return its exit code. argv[0] must be "caustic".
-fn caustic_quiet(argv as *u8) as i32 {
-    let is i64 as devnull = linux.open("/dev/null", linux.O_WRONLY, 0);
-    let is i64 as pid = linux.fork();
-    if (pid == 0) {
-        if (devnull >= 0) { linux.dup2(devnull, 1); linux.dup2(devnull, 2); }
-        env.execvp("caustic", argv);
-        linux.exit(127);
+// Run `caustic argv...` with its output suppressed (the compiler is chatty and
+// writes to stderr). On Linux we fork and send stdout+stderr to /dev/null; on
+// other targets std/process.capture swallows the child's output. Compile
+// success is checked by the caller via io.exists on the output path.
+fn caustic_quiet(argv as *u8) as void {
+    if (os.current() == os.OS_LINUX) {
+        let is i64 as devnull = linux.open("/dev/null", linux.O_WRONLY, 0);
+        let is i64 as pid = linux.fork();
+        if (pid == 0) {
+            if (devnull >= 0) { linux.dup2(devnull, 1); linux.dup2(devnull, 2); }
+            env.execvp("caustic", argv);
+            linux.exit(127);
+        }
+        if (devnull >= 0) { linux.close(devnull); }
+        proc.wait_pid(pid);
+        return;
     }
-    if (devnull >= 0) { linux.close(devnull); }
-    return proc.wait_pid(pid);
+    let is str.String as log = proc.capture("caustic", argv);   // other OSes: capture discards output
 }
 
-// Compile src to build/<name> (quietly), then run it (output visible).
-// Returns 0 on pass, 1 on failure.
+// Compile src to build/<name>, then run it. Returns 0 on pass, 1 on failure.
 fn run_case(name as *u8, src as *u8) as i32 {
     let is [256]u8 as out;
     let is i64 as p with mut = app(cast(*u8, &out), 0, "build/");
@@ -51,11 +59,14 @@ fn run_case(name as *u8, src as *u8) as i32 {
     out[p] = cast(u8, 0);
 
     label(name);
+    io.unlink(cast(*u8, &out));
 
     let is [5]i64 as cav;
     cav[0] = cast(i64, "caustic"); cav[1] = cast(i64, src);
     cav[2] = cast(i64, "-o"); cav[3] = cast(i64, cast(*u8, &out)); cav[4] = 0;
-    if (caustic_quiet(cast(*u8, &cav)) != 0) { io.write_str(1, "COMPILE FAIL\n"); return 1; }
+    caustic_quiet(cast(*u8, &cav));
+
+    if (io.exists(cast(*u8, &out)) == 0) { io.write_str(1, "COMPILE FAIL\n"); return 1; }
 
     let is [2]i64 as rav;
     rav[0] = cast(i64, cast(*u8, &out)); rav[1] = 0;
@@ -66,17 +77,11 @@ fn run_case(name as *u8, src as *u8) as i32 {
     return 1;
 }
 
-fn main() as i32 {
+fn main(argc as i64, argv as *u8) as i32 {
+    env.init(argc, argv);   // so execvp/getenv see the real environment
+
     let is i64 as fail with mut = 0;
-
-    // compile-check the whole library facade
-    io.write_str(1, "[check] facade           ");
-    let is [4]i64 as fav;
-    fav[0] = cast(i64, "caustic"); fav[1] = cast(i64, "-c");
-    fav[2] = cast(i64, "src/caustic_unicode.cst"); fav[3] = 0;
-    if (caustic_quiet(cast(*u8, &fav)) == 0) { io.write_str(1, "OK\n"); }
-    else { io.write_str(1, "COMPILE FAIL\n"); fail = fail + 1; }
-
+    fail = fail + cast(i64, run_case("test_facade",    "tests/test_facade.cst"));
     fail = fail + cast(i64, run_case("test_buf",       "tests/test_buf.cst"));
     fail = fail + cast(i64, run_case("test_ucd",       "tests/test_ucd.cst"));
     fail = fail + cast(i64, run_case("test_utf",       "tests/test_utf.cst"));

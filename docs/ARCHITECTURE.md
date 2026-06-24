@@ -97,8 +97,10 @@ that `use`s every module so callers can pull in the whole library at once.
 
 ## Constraints worth knowing
 
-- **Little-endian, x86-64.** The blobs are LE; a big-endian target would need
-  byte-swapping accessors.
+- **Little-endian.** The blobs are stored LE and read back with LE accessors,
+  so the library runs on any little-endian target (x86-64, ARM64, …) and any OS
+  Caustic supports — it's pure computation over `std/mem`, no syscalls. A
+  big-endian target would need byte-swapping accessors.
 - **Pinned to one Unicode version (16.0).** Re-pinning = re-run `fetch.cst` +
   `gen.cst`. The generator embeds the version in each table header.
 - **Encodings have no single UCD conformance file** (the WHATWG suite is
