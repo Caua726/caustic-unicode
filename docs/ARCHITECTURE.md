@@ -9,7 +9,7 @@ Unicode Character Database into fast, compact, committed lookup tables.
 ## The pipeline
 
 ```
-unicode.org data  ──fetch.sh──▶  tools/ucd/ (gitignored)
+unicode.org data  ──fetch.cst──▶  tools/ucd/ (gitignored)
                                       │
                                  tools/gen.cst  (the generator, in Caustic)
                                       │
@@ -19,9 +19,10 @@ unicode.org data  ──fetch.sh──▶  tools/ucd/ (gitignored)
                                  runtime modules  ──▶  your program
 ```
 
-`tools/fetch.sh` downloads the UCD, the UCA `allkeys.txt`, the IDNA mapping
-table, and the WHATWG encoding indexes. `tools/gen.cst` parses them and writes
-the tables as Caustic source. Because the tables are committed, a consumer never
+`tools/fetch.cst` downloads the UCD, the UCA `allkeys.txt`, the IDNA mapping
+table, and the WHATWG encoding indexes (it drives `curl` through `std/process`,
+since the servers are HTTPS-only and the stdlib has no TLS). `tools/gen.cst`
+parses them and writes the tables as Caustic source. Because the tables are committed, a consumer never
 runs the generator or touches the network — they just `use` the library.
 
 ## How a table is stored
@@ -98,7 +99,7 @@ that `use`s every module so callers can pull in the whole library at once.
 
 - **Little-endian, x86-64.** The blobs are LE; a big-endian target would need
   byte-swapping accessors.
-- **Pinned to one Unicode version (16.0).** Re-pinning = re-run `fetch.sh` +
+- **Pinned to one Unicode version (16.0).** Re-pinning = re-run `fetch.cst` +
   `gen.cst`. The generator embeds the version in each table header.
 - **Encodings have no single UCD conformance file** (the WHATWG suite is
   separate and browser-shaped), so that module is verified with curated vectors

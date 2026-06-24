@@ -1,0 +1,141 @@
+// =======================================================
+// tools/fetch.cst — download every data file tools/gen.cst reads.
+// Files land flat in tools/ucd/ (and tools/ucd/whatwg/), which is gitignored;
+// the generated tables under src/ucd/tables/ are what's committed. Pinned to
+// Unicode 16.0. Run once, then `caustic tools/gen.cst -o build/gen && ./build/gen`.
+//
+// The Unicode/WHATWG servers are HTTPS-only and the Caustic stdlib has no TLS,
+// so this drives `curl` through std/process (same dependency the old shell
+// script had). Build: caustic tools/fetch.cst -o build/fetch && ./build/fetch
+// =======================================================
+
+use "std/process.cst" as proc;
+use "std/io.cst"       as io;
+
+// Append the NUL-terminated string s into buf at pos; return the new position.
+fn app(buf as *u8, pos as i64, s as *u8) as i64 {
+    let is i64 as p with mut = pos;
+    let is i64 as i with mut = 0;
+    while (s[i] != 0) { buf[p] = s[i]; p = p + 1; i = i + 1; }
+    return p;
+}
+
+// curl -fsSL <url> -o <dest>. Returns the child's exit code (0 = ok).
+fn dl(url as *u8, dest as *u8) as i32 {
+    let is [6]i64 as av;
+    av[0] = cast(i64, "curl");
+    av[1] = cast(i64, "-fsSL");
+    av[2] = cast(i64, url);
+    av[3] = cast(i64, "-o");
+    av[4] = cast(i64, dest);
+    av[5] = 0;
+    let is i64 as pid = proc.spawnp("curl", cast(*u8, &av));
+    if (pid < 0) { return cast(i32, 0 - 1); }
+    return proc.wait_pid(pid);
+}
+
+// Fetch (prefix + name + suffix) into (dest + name + suffix). Returns 0 on ok.
+fn one(prefix as *u8, name as *u8, suffix as *u8, dest as *u8) as i32 {
+    let is [320]u8 as url;
+    let is [320]u8 as dst;
+    let is i64 as p with mut = 0;
+    p = app(cast(*u8, &url), 0, prefix);
+    p = app(cast(*u8, &url), p, name);
+    p = app(cast(*u8, &url), p, suffix);
+    url[p] = cast(u8, 0);
+    let is i64 as q with mut = 0;
+    q = app(cast(*u8, &dst), 0, dest);
+    q = app(cast(*u8, &dst), q, name);
+    q = app(cast(*u8, &dst), q, suffix);
+    dst[q] = cast(u8, 0);
+    io.write_str(1, "  ");
+    io.write_str(1, cast(*u8, &dst));
+    let is i32 as rc = dl(cast(*u8, &url), cast(*u8, &dst));
+    if (rc == 0) { io.write_str(1, "  ok\n"); } else { io.write_str(1, "  FAILED\n"); }
+    return rc;
+}
+
+fn group(prefix as *u8, names as *i64, n as i64, suffix as *u8, dest as *u8, failp as *i64) as void {
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (one(prefix, cast(*u8, names[i]), suffix, dest) != 0) { failp[0] = failp[0] + 1; }
+        i = i + 1;
+    }
+}
+
+fn mkdirp(path as *u8) as void {
+    let is [4]i64 as av;
+    av[0] = cast(i64, "mkdir"); av[1] = cast(i64, "-p"); av[2] = cast(i64, path); av[3] = 0;
+    let is i64 as pid = proc.spawnp("mkdir", cast(*u8, &av));
+    if (pid >= 0) { proc.wait_pid(pid); }
+}
+
+fn main() as i32 {
+    let is i64 as fail with mut = 0;
+    let is *u8 as txt = ".txt";
+    let is *u8 as dest = "tools/ucd/";
+
+    mkdirp("tools/ucd/whatwg");
+
+    // --- Unicode 16.0 UCD ---
+    io.write_str(1, "Unicode 16.0 UCD ...\n");
+    let is [11]i64 as ucd;
+    ucd[0]  = cast(i64, "UnicodeData");        ucd[1]  = cast(i64, "PropList");
+    ucd[2]  = cast(i64, "DerivedCoreProperties"); ucd[3] = cast(i64, "Scripts");
+    ucd[4]  = cast(i64, "EastAsianWidth");     ucd[5]  = cast(i64, "LineBreak");
+    ucd[6]  = cast(i64, "CaseFolding");        ucd[7]  = cast(i64, "SpecialCasing");
+    ucd[8]  = cast(i64, "DerivedNormalizationProps"); ucd[9] = cast(i64, "BidiMirroring");
+    ucd[10] = cast(i64, "BidiBrackets");
+    group("https://www.unicode.org/Public/16.0.0/ucd/", cast(*i64, &ucd), 11, txt, dest, &fail);
+
+    let is [2]i64 as ext;
+    ext[0] = cast(i64, "DerivedBidiClass"); ext[1] = cast(i64, "DerivedJoiningType");
+    group("https://www.unicode.org/Public/16.0.0/ucd/extracted/", cast(*i64, &ext), 2, txt, dest, &fail);
+
+    let is [3]i64 as aux;
+    aux[0] = cast(i64, "GraphemeBreakProperty"); aux[1] = cast(i64, "WordBreakProperty");
+    aux[2] = cast(i64, "SentenceBreakProperty");
+    group("https://www.unicode.org/Public/16.0.0/ucd/auxiliary/", cast(*i64, &aux), 3, txt, dest, &fail);
+
+    let is [1]i64 as emo;
+    emo[0] = cast(i64, "emoji-data");
+    group("https://www.unicode.org/Public/16.0.0/ucd/emoji/", cast(*i64, &emo), 1, txt, dest, &fail);
+
+    // --- UCA (collation) ---
+    io.write_str(1, "UCA 16.0 ...\n");
+    let is [1]i64 as uca;
+    uca[0] = cast(i64, "allkeys");
+    group("https://www.unicode.org/Public/UCA/16.0.0/", cast(*i64, &uca), 1, txt, dest, &fail);
+
+    // --- IDNA ---
+    io.write_str(1, "IDNA 16.0 ...\n");
+    let is [1]i64 as idn;
+    idn[0] = cast(i64, "IdnaMappingTable");
+    group("https://www.unicode.org/Public/idna/16.0.0/", cast(*i64, &idn), 1, txt, dest, &fail);
+
+    // --- WHATWG Encoding Standard indexes ---
+    io.write_str(1, "WHATWG encoding indexes ...\n");
+    let is [33]i64 as ww;
+    ww[0]  = cast(i64, "index-ibm866");        ww[1]  = cast(i64, "index-iso-8859-2");
+    ww[2]  = cast(i64, "index-iso-8859-3");    ww[3]  = cast(i64, "index-iso-8859-4");
+    ww[4]  = cast(i64, "index-iso-8859-5");    ww[5]  = cast(i64, "index-iso-8859-6");
+    ww[6]  = cast(i64, "index-iso-8859-7");    ww[7]  = cast(i64, "index-iso-8859-8");
+    ww[8]  = cast(i64, "index-iso-8859-10");   ww[9]  = cast(i64, "index-iso-8859-13");
+    ww[10] = cast(i64, "index-iso-8859-14");   ww[11] = cast(i64, "index-iso-8859-15");
+    ww[12] = cast(i64, "index-iso-8859-16");   ww[13] = cast(i64, "index-koi8-r");
+    ww[14] = cast(i64, "index-koi8-u");        ww[15] = cast(i64, "index-macintosh");
+    ww[16] = cast(i64, "index-windows-874");   ww[17] = cast(i64, "index-windows-1250");
+    ww[18] = cast(i64, "index-windows-1251");  ww[19] = cast(i64, "index-windows-1252");
+    ww[20] = cast(i64, "index-windows-1253");  ww[21] = cast(i64, "index-windows-1254");
+    ww[22] = cast(i64, "index-windows-1255");  ww[23] = cast(i64, "index-windows-1256");
+    ww[24] = cast(i64, "index-windows-1257");  ww[25] = cast(i64, "index-windows-1258");
+    ww[26] = cast(i64, "index-x-mac-cyrillic"); ww[27] = cast(i64, "index-jis0208");
+    ww[28] = cast(i64, "index-jis0212");       ww[29] = cast(i64, "index-big5");
+    ww[30] = cast(i64, "index-euc-kr");        ww[31] = cast(i64, "index-gb18030");
+    ww[32] = cast(i64, "index-gb18030-ranges");
+    group("https://encoding.spec.whatwg.org/", cast(*i64, &ww), 33, txt, "tools/ucd/whatwg/", &fail);
+
+    if (fail == 0) { io.write_str(1, "done.\n"); return 0; }
+    io.write_str(1, "FAILED: "); io.write_int(1, fail); io.write_str(1, " file(s)\n");
+    return 1;
+}

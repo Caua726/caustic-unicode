@@ -25,8 +25,9 @@ target "conf_collate"   { src "tests/conformance/conf_collate.cst"   out "build/
 # --- example ---
 target "demo" { src "examples/demo.cst" out "build/demo" }
 
-# --- table generator (offline) ---
-target "gen" { src "tools/gen.cst" out "build/gen" }
+# --- offline tooling ---
+target "fetch" { src "tools/fetch.cst" out "build/fetch" }
+target "gen"   { src "tools/gen.cst"   out "build/gen" }
 
 # compile the whole library, then run every test + conformance suite
 script "test" {
@@ -40,7 +41,7 @@ script "gen" {
 
 # download the UCD/UCA/IDNA/WHATWG data, then regenerate the tables
 script "regen" {
-    "bash tools/fetch.sh && caustic tools/gen.cst -o build/gen && ./build/gen"
+    "caustic tools/fetch.cst -o build/fetch && ./build/fetch && caustic tools/gen.cst -o build/gen && ./build/gen"
 }
 
 script "clean" {

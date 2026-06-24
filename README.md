@@ -79,9 +79,12 @@ You only need this to re-pin to a newer Unicode version; the tables are already
 committed.
 
 ```bash
-bash tools/fetch.sh                                  # download UCD/UCA/IDNA/WHATWG data into tools/ucd/ (gitignored)
-caustic tools/gen.cst -o build/gen && ./build/gen    # rewrite src/ucd/tables/*.cst
+caustic tools/fetch.cst -o build/fetch && ./build/fetch   # download UCD/UCA/IDNA/WHATWG data into tools/ucd/ (gitignored)
+caustic tools/gen.cst   -o build/gen   && ./build/gen     # rewrite src/ucd/tables/*.cst
 ```
+
+(`tools/fetch.cst` drives `curl` through `std/process` — the Unicode/WHATWG
+servers are HTTPS-only and the Caustic stdlib has no TLS.)
 
 ## Layout
 
@@ -92,7 +95,7 @@ src/        the library
   utf/  width/  normalize/  case/  segment/
   linebreak/  bidi/  collate/  idna/  encodings/
   caustic_unicode.cst   umbrella facade
-tools/      gen.cst (table generator) + fetch.sh
+tools/      gen.cst (table generator) + fetch.cst (data downloader)
 tests/      test_*.cst, conformance/conf_*.cst, vectors/ (official Unicode test files)
 docs/       ARCHITECTURE.md, API.md
 ```
