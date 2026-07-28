@@ -32,18 +32,28 @@ target "fetch" { src "tools/fetch.cst" out "build/fetch" }   # data downloader
 target "gen"   { src "tools/gen.cst"   out "build/gen" }     # table generator
 
 # compile the whole library, then run every test + conformance suite
+# `caustic-mk build <target>` rather than a bare `caustic -o build/...`: the
+# build system creates the output's parent directory and the compiler does not.
+# build/ is ignored, so it does not exist in a fresh clone, and every one of
+# these scripts failed there — on the machine that wrote them the directory
+# already existed and nothing ever said otherwise.
 script "test" {
-    "caustic tests/run.cst -o build/run && ./build/run"
+    "caustic-mk build run"
+    "./build/run"
 }
 
 # regenerate src/ucd/tables/*.cst from the UCD already in tools/ucd/
 script "gen" {
-    "caustic tools/gen.cst -o build/gen && ./build/gen"
+    "caustic-mk build gen"
+    "./build/gen"
 }
 
 # download the UCD/UCA/IDNA/WHATWG data, then regenerate the tables
 script "regen" {
-    "caustic tools/fetch.cst -o build/fetch && ./build/fetch && caustic tools/gen.cst -o build/gen && ./build/gen"
+    "caustic-mk build fetch"
+    "./build/fetch"
+    "caustic-mk build gen"
+    "./build/gen"
 }
 
 script "clean" {
