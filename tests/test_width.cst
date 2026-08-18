@@ -27,5 +27,41 @@ fn main() as i32 {
     if (width.cp_width_amb(161, 0) != 1) { return 10; }
     if (width.cp_width_amb(161, 1) != 2) { return 11; }
 
+    // --- emoji, which East_Asian_Width alone gets wrong ---
+    // Every case below was checked against a terminal that draws it two cells
+    // wide. Deciding by East_Asian_Width answered 1 for all three: regional
+    // indicators are Neutral, U+2764 is Neutral, and a keycap is a digit plus
+    // two zero-width code points.
+
+    // U+1F1E7 U+1F1F7 — a flag: one cluster (GB12/13), two columns.
+    let is *u8 as flag = "\xF0\x9F\x87\xA7\xF0\x9F\x87\xB7";
+    if (width.string_width(flag, 8) != 2) { return 12; }
+
+    // U+2764 U+FE0F — red heart. The base has no Emoji_Presentation; VS16 is
+    // what asks for the emoji glyph, and the emoji glyph is two columns.
+    let is *u8 as heart = "\xE2\x9D\xA4\xEF\xB8\x8F";
+    if (width.string_width(heart, 6) != 2) { return 13; }
+
+    // '1' U+FE0F U+20E3 — keycap. Same rule: the digit is one column until
+    // VS16 turns the sequence into an emoji.
+    let is *u8 as keycap = "\x31\xEF\xB8\x8F\xE2\x83\xA3";
+    if (width.string_width(keycap, 7) != 2) { return 14; }
+
+    // A single regional indicator on its own is still two columns — it is drawn
+    // as a letter-in-a-box, not as half a flag.
+    if (width.cp_width(0x1F1E7) != 2) { return 15; }
+
+    // The narrow scope of the VS16 rule: a bare selector is still 0, and one on
+    // a Latin letter selects nothing.
+    let is *u8 as bare_vs = "\xEF\xB8\x8F";
+    if (width.string_width(bare_vs, 3) != 0) { return 17; }
+    let is *u8 as a_vs = "\x41\xEF\xB8\x8F";
+    if (width.string_width(a_vs, 4) != 1) { return 18; }
+
+    // U+1F468 ZWJ U+1F469 ZWJ U+1F467 — one cluster (GB11), two columns, not
+    // the six a per-code-point sum would give.
+    let is *u8 as fam = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7";
+    if (width.string_width(fam, 18) != 2) { return 16; }
+
     return 0;
 }
