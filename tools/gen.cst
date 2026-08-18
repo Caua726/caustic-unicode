@@ -1311,6 +1311,26 @@ fn gen_extpict() as i32 {
     return build_and_emit("src/ucd/tables/extpict.cst", "extpict", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
 }
 
+// ---- Emoji_Presentation (emoji-data.txt) for terminal column width ----
+// Distinct from Extended_Pictographic on purpose: Extended_Pictographic asks
+// "may this be part of an emoji cluster", which is a segmentation question and
+// true of things a terminal draws one column wide (U+00A9 COPYRIGHT SIGN, every
+// keycap base digit). Emoji_Presentation asks "does this default to the emoji
+// glyph with no variation selector", which is the width question — those are
+// the code points a terminal gives two cells to even though East_Asian_Width
+// calls them Neutral. Regional indicators U+1F1E6..U+1F1FF are the case that
+// forced this table to exist: EAW Neutral, drawn two columns wide.
+fn gen_emojipres() as i32 {
+    let is *u16 as flat = cast(*u16, mem.core.mmap_anon(cast(i64, NUMCP) * 2));
+    if (cast(i64, flat) == 0) { return cast(i32, 0 - 1); }
+    let is i32 as l with mut = 0;
+    let is *u8 as p = slurp("tools/ucd/emoji-data.txt", &l);
+    if (cast(i64, p) == 0) { return cast(i32, 0 - 1); }
+    mark_prop(p, l, "Emoji_Presentation", 1, flat);
+    io.write_str(1, "emojipres:");
+    return build_and_emit("src/ucd/tables/emojipres.cst", "emojipres", "X", flat, 0, U_MAXCP, cast(*i64, 0), 0);
+}
+
 // ---- Bidi paired brackets (BidiBrackets.txt) ----
 // Sorted by cp: bk_cp[i], bk_pair[i], bk_type[i] (0 open, 1 close).
 fn gen_brackets() as i32 {
@@ -2022,6 +2042,7 @@ fn main() as i32 {
     if (gen_sbcs() < 0) { return 23; }
     if (gen_mbcs() < 0) { return 24; }
     if (gen_joining() < 0) { return 25; }
+    if (gen_emojipres() < 0) { return 26; }
     io.write_str(1, "gen: ok\n");
     return 0;
 }
