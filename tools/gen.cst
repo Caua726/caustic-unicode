@@ -2038,6 +2038,8 @@ fn main() as i32 {
     if (gen_mirror() < 0) { return 19; }
     if (gen_idna() < 0) { return 20; }
     if (gen_uideo() < 0) { return 21; }
+    if (gen_enum_file("tools/ucd/IndicSyllabicCategory.txt", "src/ucd/tables/isc.cst", "isc", "ISC", "Other", U_MAXCP) < 0) { return 40; }
+    if (gen_enum_file("tools/ucd/IndicPositionalCategory.txt", "src/ucd/tables/ipc.cst", "ipc", "IPC", "NA", U_MAXCP) < 0) { return 41; }
     if (gen_collate() < 0) { return 22; }
     if (gen_sbcs() < 0) { return 23; }
     if (gen_mbcs() < 0) { return 24; }

@@ -11,8 +11,29 @@ use "../src/ucd/tables/script.cst" as scr;
 use "../src/ucd/tables/eaw.cst"    as eaw;
 use "../src/ucd/tables/bidi.cst"   as bidi;
 use "../src/ucd/tables/gcb.cst"    as gcb;
+use "../src/ucd/tables/isc.cst"    as isc;
+use "../src/ucd/tables/ipc.cst"    as ipc;
 
 fn main() as i32 {
+    // Indic_Syllabic_Category and Indic_Positional_Category.
+    if (props.indic_syllabic_category(2325) != isc.ISC_Consonant) { return 201; }           // U+0915 KA
+    if (props.indic_syllabic_category(2381) != isc.ISC_Virama) { return 202; }              // U+094D
+    if (props.indic_syllabic_category(2364) != isc.ISC_Nukta) { return 203; }               // U+093C
+    if (props.indic_syllabic_category(2366) != isc.ISC_Vowel_Dependent) { return 204; }     // U+093E AA
+    if (props.indic_syllabic_category(2308) != isc.ISC_Vowel_Independent) { return 205; }   // U+0904
+    if (props.indic_syllabic_category(2306) != isc.ISC_Bindu) { return 206; }               // U+0902
+    if (props.indic_syllabic_category(8205) != isc.ISC_Joiner) { return 207; }              // U+200D
+    if (props.indic_syllabic_category(8204) != isc.ISC_Non_Joiner) { return 208; }          // U+200C
+    if (props.indic_syllabic_category(65)   != isc.ISC_Other) { return 209; }               // 'A'
+    if (props.indic_syllabic_category(1114111) != isc.ISC_Other) { return 210; }
+    if (props.indic_syllabic_category(69688) != isc.ISC_Vowel_Dependent) { return 211; }    // U+11038 Brahmi, past the BMP
+    if (props.indic_positional_category(2367) != ipc.IPC_Left) { return 220; }              // U+093F I
+    if (props.indic_positional_category(2366) != ipc.IPC_Right) { return 221; }             // U+093E AA
+    if (props.indic_positional_category(2369) != ipc.IPC_Bottom) { return 222; }            // U+0941 U
+    if (props.indic_positional_category(2375) != ipc.IPC_Top) { return 223; }               // U+0947 E
+    if (props.indic_positional_category(2507) != ipc.IPC_Left_And_Right) { return 224; }    // U+09CB
+    if (props.indic_positional_category(65) != ipc.IPC_NA) { return 225; }
+    if (props.indic_positional_category(1114111) != ipc.IPC_NA) { return 226; }
     if (props.general_category(65)       != props.GC_LU) { return 1; }   // 'A' U+0041
     if (props.general_category(97)       != props.GC_LL) { return 2; }   // 'a' U+0061
     if (props.general_category(48)       != props.GC_ND) { return 3; }   // '0' U+0030

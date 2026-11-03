@@ -79,14 +79,15 @@ fn main() as i32 {
 
     // --- Unicode 16.0 UCD ---
     io.write_str(1, "Unicode 16.0 UCD ...\n");
-    let is [11]i64 as ucd;
+    let is [13]i64 as ucd;
     ucd[0]  = cast(i64, "UnicodeData");        ucd[1]  = cast(i64, "PropList");
     ucd[2]  = cast(i64, "DerivedCoreProperties"); ucd[3] = cast(i64, "Scripts");
     ucd[4]  = cast(i64, "EastAsianWidth");     ucd[5]  = cast(i64, "LineBreak");
     ucd[6]  = cast(i64, "CaseFolding");        ucd[7]  = cast(i64, "SpecialCasing");
     ucd[8]  = cast(i64, "DerivedNormalizationProps"); ucd[9] = cast(i64, "BidiMirroring");
-    ucd[10] = cast(i64, "BidiBrackets");
-    group("https://www.unicode.org/Public/16.0.0/ucd/", cast(*i64, &ucd), 11, txt, dest, &fail);
+    ucd[10] = cast(i64, "BidiBrackets");       ucd[11] = cast(i64, "IndicSyllabicCategory");
+    ucd[12] = cast(i64, "IndicPositionalCategory");
+    group("https://www.unicode.org/Public/16.0.0/ucd/", cast(*i64, &ucd), 13, txt, dest, &fail);
 
     let is [2]i64 as ext;
     ext[0] = cast(i64, "DerivedBidiClass"); ext[1] = cast(i64, "DerivedJoiningType");
